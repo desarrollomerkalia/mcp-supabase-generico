@@ -174,7 +174,6 @@ async function handleToolCall(name, args) {
   throw new Error("Herramienta no encontrada");
 }
 
-// Soporte SSE
 const transports = new Map();
 
 function createMcpServer() {
@@ -198,9 +197,14 @@ function createMcpServer() {
   return server;
 }
 
+// Respuestas a pings HEAD
 app.head('/', (req, res) => res.status(200).end());
 app.head('/sse', (req, res) => res.status(200).end());
-app.delete('/*', (req, res) => res.status(200).json({ status: "ok" }));
+
+// Respuestas a DELETE explícitas
+app.delete('/', (req, res) => res.status(200).json({ status: "ok" }));
+app.delete('/sse', (req, res) => res.status(200).json({ status: "ok" }));
+app.delete('/message', (req, res) => res.status(200).json({ status: "ok" }));
 
 const handleSse = async (req, res) => {
   console.log(`[SSE GET] Nueva conexion desde ${req.url}`);
@@ -278,7 +282,6 @@ const handleMessage = async (req, res) => {
     }
   }
 
-  // Fallback a transporte SSE si aplica
   const sessionId = req.query.sessionId;
   let transport = sessionId ? transports.get(sessionId) : Array.from(transports.values())[0];
 
