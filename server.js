@@ -219,24 +219,24 @@ const handleMessage = async (req, res) => {
       req.url = `${req.url}${sep}sessionId=${transport.sessionId}`;
     }
 
-    // Interceptar writeHead y statusCode nativos de Node.js
+    // Interceptar cabeceras y cuerpo para garantizar respuesta HTTP 200 en JSON válido
     const origWriteHead = res.writeHead;
     res.writeHead = function(statusCode, ...args) {
-      if (statusCode === 202) statusCode = 200;
-      return origWriteHead.call(this, statusCode, ...args);
+      return origWriteHead.call(this, 200, ...args);
     };
 
-    let currentCode = 200;
-    Object.defineProperty(res, 'statusCode', {
-      get: () => currentCode,
-      set: (val) => { currentCode = (val === 202 ? 200 : val); },
-      configurable: true,
-      enumerable: true
-    });
+    const origEnd = res.end;
+    res.end = function(chunk, encoding, cb) {
+      res.setHeader('Content-Type', 'application/json');
+      if (chunk === 'Accepted' || !chunk) {
+        chunk = JSON.stringify({ status: "ok", message: "Accepted" });
+      }
+      return origEnd.call(this, chunk, encoding, cb);
+    };
 
     await transport.handlePostMessage(req, res);
   } else {
-    res.status(200).json({ jsonrpc: "2.0", result: {}, id: 1 });
+    res.status(200).json({ status: "ok", message: "Accepted" });
   }
 };
 
