@@ -24,13 +24,13 @@ const server = new Server({
 let transport;
 
 // COMODÍN: Atrapa cualquier petición GET en cualquier ruta para iniciar la conexión
-app.get('/*', async (req, res) => {
+app.get('*', async (req, res) => {
   transport = new SSEServerTransport('/message', res);
   await server.connect(transport);
 });
 
 // COMODÍN: Atrapa cualquier petición POST para ejecutar las herramientas
-app.post('/*', async (req, res) => {
+app.post('*', async (req, res) => {
   if (transport) {
     await transport.handlePostMessage(req, res);
   } else {
