@@ -8,9 +8,9 @@ import { createClient } from '@supabase/supabase-js';
 const app = express();
 app.use(cors());
 
-// Logger: Esto imprimirá en Render exactamente qué ruta está buscando RDWAI
+// Logger de peticiones
 app.use((req, res, next) => {
-  console.log(`[RDWAI] Petición entrante: ${req.method} ${req.url}`);
+  console.log(`[RDWAI] Peticion: ${req.method} ${req.url}`);
   next();
 });
 
@@ -23,22 +23,30 @@ const server = new Server({
 
 let transport;
 
-// COMODÍN: Atrapa cualquier petición GET en cualquier ruta para iniciar la conexión
-app.get('*', async (req, res) => {
+const handleSse = async (req, res) => {
+  console.log(`[SSE GET] Iniciando conexion SSE en ${req.url}`);
   transport = new SSEServerTransport('/message', res);
   await server.connect(transport);
-});
+};
 
-// COMODÍN: Atrapa cualquier petición POST para ejecutar las herramientas
-app.post('*', async (req, res) => {
+const handleMessage = async (req, res) => {
+  console.log(`[POST Message] Recibiendo accion en ${req.url}`);
   if (transport) {
     await transport.handlePostMessage(req, res);
   } else {
     res.status(500).send("Transporte SSE no inicializado");
   }
-});
+};
 
-// Registrar todas las herramientas
+// Rutas explícitas compatibles con Express 5
+app.get('/sse', handleSse);
+app.get('/', handleSse);
+
+app.post('/message', handleMessage);
+app.post('/sse/message', handleMessage);
+app.post('/', handleMessage);
+
+// Registrar herramientas
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   const credenciales = {
     supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
