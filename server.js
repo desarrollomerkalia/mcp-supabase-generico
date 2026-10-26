@@ -40,15 +40,18 @@ const credencialesBase = {
 const TOOLS_LIST = [
   {
     name: "supabase_leer",
-    description: "Lee registros de una tabla respetando RLS si se provee userToken.",
+    description: "Lee registros de una tabla con soporte para batches automáticos (sin límite de 1000), paginación, conteo total, ordenamiento y filtros. Respeta RLS si se provee userToken.",
     inputSchema: {
       type: "object",
       properties: { 
         ...credencialesBase,
         tabla: { type: "string", description: "Nombre de la tabla" },
         columnas: { type: "string", description: "Columnas a devolver (ej. 'id, nombre')", default: "*" },
-        filtros: { type: "object", description: "Filtros clave-valor (ej. {\"estado\": \"activo\"})" },
-        limite: { type: "number", default: 50 } 
+        filtros: { type: "object", description: "Filtros clave-valor (ej. {\"estado\": \"activo\"} o {\"id\": [1,2,3]})" },
+        limite: { type: "number", description: "Cantidad total de registros deseados (si supera 1000 se obtienen en batches automáticamente; por defecto 50)", default: 50 },
+        pagina: { type: "number", description: "Número de página a consultar (por defecto 1)", default: 1 },
+        orden_columna: { type: "string", description: "Nombre de la columna para ordenar (opcional)" },
+        orden_asc: { type: "boolean", description: "true para ascendente, false para descendente (por defecto true)", default: true }
       },
       required: ["supabaseUrl", "supabaseKey", "tabla"]
     }
@@ -152,15 +155,75 @@ async function handleToolCall(name, args) {
   const supabase = getSupabaseClient(args);
 
   if (name === "supabase_leer") {
-    let query = supabase.from(args.tabla).select(args.columnas || '*').limit(args.limite || 50);
-    if (args.filtros) {
-      for (const [key, value] of Object.entries(args.filtros)) {
-        query = query.eq(key, value);
+    const limiteSolicitado = Math.max(parseInt(args.limite) || 50, 1);
+    const pagina = Math.max(parseInt(args.pagina) || 1, 1);
+    const offsetInicial = (pagina - 1) * limiteSolicitado;
+    const BATCH_SIZE = 1000;
+
+    let todosLosDatos = [];
+    let totalRegistros = null;
+    let descargados = 0;
+
+    // Ejecuta batches internos de hasta 1,000 filas hasta completar lo solicitado
+    while (descargados < limiteSolicitado) {
+      const cantidadABuscar = Math.min(BATCH_SIZE, limiteSolicitado - descargados);
+      const desde = offsetInicial + descargados;
+      const hasta = desde + cantidadABuscar - 1;
+
+      let query = supabase.from(args.tabla).select(
+        args.columnas || '*', 
+        { count: descargados === 0 ? 'exact' : undefined }
+      );
+
+      if (args.filtros) {
+        for (const [key, value] of Object.entries(args.filtros)) {
+          if (Array.isArray(value)) {
+            query = query.in(key, value);
+          } else {
+            query = query.eq(key, value);
+          }
+        }
+      }
+
+      if (args.orden_columna) {
+        query = query.order(args.orden_columna, { ascending: args.orden_asc !== false });
+      }
+
+      query = query.range(desde, hasta);
+
+      const { data, count, error } = await query;
+      if (error) throw error;
+
+      if (descargados === 0) {
+        totalRegistros = count;
+      }
+
+      if (!data || data.length === 0) {
+        break;
+      }
+
+      todosLosDatos.push(...data);
+      descargados += data.length;
+
+      // Si Supabase devolvió menos registros de los solicitados en este batch, se acabaron las filas
+      if (data.length < cantidadABuscar) {
+        break;
       }
     }
-    const { data, error } = await query;
-    if (error) throw error;
-    return [{ type: "text", text: JSON.stringify(data, null, 2) }];
+
+    const totalPaginas = totalRegistros !== null ? Math.ceil(totalRegistros / limiteSolicitado) : 1;
+
+    return [{
+      type: "text",
+      text: JSON.stringify({
+        pagina_actual: pagina,
+        limite_solicitado: limiteSolicitado,
+        registros_devueltos: todosLosDatos.length,
+        total_registros: totalRegistros,
+        total_paginas: totalPaginas,
+        datos: todosLosDatos
+      }, null, 2)
+    }];
   } 
   
   if (name === "supabase_insertar") {
@@ -213,7 +276,7 @@ const transports = new Map();
 function createMcpServer() {
   const server = new Server({
     name: "Supabase-Generico-Completo-MCP",
-    version: "2.2.0"
+    version: "2.4.0"
   }, {
     capabilities: { tools: {} }
   });
@@ -278,7 +341,7 @@ const handleMessage = async (req, res) => {
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "Supabase-Generico-Completo-MCP", version: "2.2.0" }
+          serverInfo: { name: "Supabase-Generico-Completo-MCP", version: "2.4.0" }
         }
       });
     }
