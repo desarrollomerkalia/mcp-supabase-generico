@@ -15,15 +15,36 @@ app.use((req, res, next) => {
   next();
 });
 
+// Helper para instanciar cliente de Supabase (Soporta RLS vía userToken)
+function getSupabaseClient(args) {
+  const { supabaseUrl, supabaseKey, userToken } = args;
+  const options = {};
+
+  if (userToken) {
+    options.global = {
+      headers: {
+        Authorization: `Bearer ${userToken}`
+      }
+    };
+  }
+
+  return createClient(supabaseUrl, supabaseKey, options);
+}
+
+const credencialesBase = {
+  supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
+  supabaseKey: { type: "string", description: "Clave de Supabase (anon_key para RLS o service_role para admin)" },
+  userToken: { type: "string", description: "JWT de acceso del usuario autenticado (Opcional, activa RLS)" }
+};
+
 const TOOLS_LIST = [
   {
     name: "supabase_leer",
-    description: "Lee registros de una tabla con filtros opcionales.",
+    description: "Lee registros de una tabla respetando RLS si se provee userToken.",
     inputSchema: {
       type: "object",
       properties: { 
-        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-        supabaseKey: { type: "string", description: "Service Role Key" },
+        ...credencialesBase,
         tabla: { type: "string", description: "Nombre de la tabla" },
         columnas: { type: "string", description: "Columnas a devolver (ej. 'id, nombre')", default: "*" },
         filtros: { type: "object", description: "Filtros clave-valor (ej. {\"estado\": \"activo\"})" },
@@ -34,12 +55,11 @@ const TOOLS_LIST = [
   },
   {
     name: "supabase_insertar",
-    description: "Inserta uno o múltiples registros en una tabla.",
+    description: "Inserta uno o múltiples registros respetando RLS si se provee userToken.",
     inputSchema: {
       type: "object",
       properties: { 
-        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-        supabaseKey: { type: "string", description: "Service Role Key" },
+        ...credencialesBase,
         tabla: { type: "string", description: "Nombre de la tabla" },
         datos: { type: "object", description: "JSON o Array con los datos" } 
       },
@@ -48,12 +68,11 @@ const TOOLS_LIST = [
   },
   {
     name: "supabase_actualizar",
-    description: "Actualiza registros filtrando por una columna.",
+    description: "Actualiza registros filtrando por columna respetando RLS si se provee userToken.",
     inputSchema: {
       type: "object",
       properties: { 
-        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-        supabaseKey: { type: "string", description: "Service Role Key" },
+        ...credencialesBase,
         tabla: { type: "string", description: "Nombre de la tabla" },
         columna_filtro: { type: "string", description: "Columna para buscar (ej. 'id')" },
         valor_filtro: { type: "string", description: "Valor a buscar" },
@@ -64,12 +83,11 @@ const TOOLS_LIST = [
   },
   {
     name: "supabase_eliminar",
-    description: "Elimina registros filtrando por una columna.",
+    description: "Elimina registros respetando RLS si se provee userToken.",
     inputSchema: {
       type: "object",
       properties: { 
-        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-        supabaseKey: { type: "string", description: "Service Role Key" },
+        ...credencialesBase,
         tabla: { type: "string" },
         columna_filtro: { type: "string" },
         valor_filtro: { type: "string" }
@@ -79,12 +97,11 @@ const TOOLS_LIST = [
   },
   {
     name: "supabase_upsertar",
-    description: "Inserta un registro o lo actualiza si ya existe la clave primaria.",
+    description: "Inserta o actualiza registros respetando RLS si se provee userToken.",
     inputSchema: {
       type: "object",
       properties: { 
-        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-        supabaseKey: { type: "string", description: "Service Role Key" },
+        ...credencialesBase,
         tabla: { type: "string" },
         datos: { type: "object" } 
       },
@@ -93,12 +110,11 @@ const TOOLS_LIST = [
   },
   {
     name: "supabase_rpc",
-    description: "Ejecuta una función de Postgres (Stored Procedure) ya existente.",
+    description: "Ejecuta una función de Postgres (Stored Procedure) bajo el contexto del usuario si se provee userToken.",
     inputSchema: {
       type: "object",
       properties: { 
-        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-        supabaseKey: { type: "string", description: "Service Role Key" },
+        ...credencialesBase,
         funcion: { type: "string", description: "Nombre de la función RPC" },
         parametros: { type: "object", description: "JSON con los parámetros" }
       },
@@ -107,7 +123,7 @@ const TOOLS_LIST = [
   },
   {
     name: "supabase_auth_listar_usuarios",
-    description: "Lista los usuarios de Auth (Requiere Service Role Key).",
+    description: "Lista los usuarios de Auth (Requiere Service Role Key obligatoriamente).",
     inputSchema: {
       type: "object",
       properties: { 
@@ -119,7 +135,7 @@ const TOOLS_LIST = [
   },
   {
     name: "supabase_ejecutar_sql",
-    description: "Ejecuta sentencias SQL arbitrarias (CREATE TABLE, ALTER TABLE, CREATE FUNCTION, etc.). Requiere la función exec_sql creada en Supabase.",
+    description: "Ejecuta sentencias SQL arbitrarias (Solo administradores / Service Role Key).",
     inputSchema: {
       type: "object",
       properties: { 
@@ -133,8 +149,7 @@ const TOOLS_LIST = [
 ];
 
 async function handleToolCall(name, args) {
-  const { supabaseUrl, supabaseKey } = args;
-  const supabase = createClient(supabaseUrl, supabaseKey);
+  const supabase = getSupabaseClient(args);
 
   if (name === "supabase_leer") {
     let query = supabase.from(args.tabla).select(args.columnas || '*').limit(args.limite || 50);
@@ -198,7 +213,7 @@ const transports = new Map();
 function createMcpServer() {
   const server = new Server({
     name: "Supabase-Generico-Completo-MCP",
-    version: "2.1.0"
+    version: "2.2.0"
   }, {
     capabilities: { tools: {} }
   });
@@ -216,6 +231,7 @@ function createMcpServer() {
   return server;
 }
 
+// Respuestas HEAD y DELETE
 app.head('/', (req, res) => res.status(200).end());
 app.head('/sse', (req, res) => res.status(200).end());
 
@@ -245,6 +261,7 @@ const handleSse = async (req, res) => {
 app.get('/sse', handleSse);
 app.get('/', handleSse);
 
+// Manejador POST directo
 const handleMessage = async (req, res) => {
   const body = req.body;
 
@@ -261,7 +278,7 @@ const handleMessage = async (req, res) => {
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "Supabase-Generico-Completo-MCP", version: "2.1.0" }
+          serverInfo: { name: "Supabase-Generico-Completo-MCP", version: "2.2.0" }
         }
       });
     }
@@ -271,7 +288,6 @@ const handleMessage = async (req, res) => {
     }
 
     if (method === 'tools/list') {
-      console.log("[JSON-RPC Directo] Entregando las 8 herramientas!");
       return res.status(200).json({
         jsonrpc: "2.0",
         id: id,
@@ -297,24 +313,3 @@ const handleMessage = async (req, res) => {
       }
     }
   }
-
-  const sessionId = req.query.sessionId;
-  let transport = sessionId ? transports.get(sessionId) : Array.from(transports.values())[0];
-
-  if (transport) {
-    req.url = `/message?sessionId=${transport.sessionId}`;
-    await transport.handlePostMessage(req, res);
-  } else {
-    res.status(200).json({ jsonrpc: "2.0", result: {}, id: 1 });
-  }
-};
-
-app.post('/message', handleMessage);
-app.post('/sse/message', handleMessage);
-app.post('/sse', handleMessage);
-app.post('/', handleMessage);
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Servidor MCP genérico de Supabase corriendo en el puerto ${PORT}`);
-});
