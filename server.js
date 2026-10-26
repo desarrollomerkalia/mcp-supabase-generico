@@ -8,6 +8,12 @@ import { createClient } from '@supabase/supabase-js';
 const app = express();
 app.use(cors());
 
+// Logger: Esto imprimirá en Render exactamente qué ruta está buscando RDWAI
+app.use((req, res, next) => {
+  console.log(`[RDWAI] Petición entrante: ${req.method} ${req.url}`);
+  next();
+});
+
 const server = new Server({
   name: "Supabase-Generico-Completo-MCP",
   version: "2.0.0"
@@ -17,12 +23,14 @@ const server = new Server({
 
 let transport;
 
-app.get('/sse', async (req, res) => {
+// COMODÍN: Atrapa cualquier petición GET en cualquier ruta para iniciar la conexión
+app.get('/*', async (req, res) => {
   transport = new SSEServerTransport('/message', res);
   await server.connect(transport);
 });
 
-app.post('/message', async (req, res) => {
+// COMODÍN: Atrapa cualquier petición POST para ejecutar las herramientas
+app.post('/*', async (req, res) => {
   if (transport) {
     await transport.handlePostMessage(req, res);
   } else {
