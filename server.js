@@ -193,7 +193,6 @@ const handleSse = async (req, res) => {
   
   transports.set(transport.sessionId, transport);
 
-  // Mantener conexión viva con pings cada 15 segundos
   const keepAlive = setInterval(() => {
     res.write(': keepalive\n\n');
   }, 15000);
@@ -220,8 +219,20 @@ const handleMessage = async (req, res) => {
       req.url = `${req.url}${sep}sessionId=${transport.sessionId}`;
     }
 
-    const origStatus = res.status.bind(res);
-    res.status = (code) => origStatus(code === 202 ? 200 : code);
+    // Interceptar writeHead y statusCode nativos de Node.js
+    const origWriteHead = res.writeHead;
+    res.writeHead = function(statusCode, ...args) {
+      if (statusCode === 202) statusCode = 200;
+      return origWriteHead.call(this, statusCode, ...args);
+    };
+
+    let currentCode = 200;
+    Object.defineProperty(res, 'statusCode', {
+      get: () => currentCode,
+      set: (val) => { currentCode = (val === 202 ? 200 : val); },
+      configurable: true,
+      enumerable: true
+    });
 
     await transport.handlePostMessage(req, res);
   } else {
