@@ -189,7 +189,8 @@ app.head('/sse', (req, res) => res.status(200).end());
 const handleSse = async (req, res) => {
   console.log(`[SSE GET] Nueva conexion desde ${req.url}`);
   const server = createMcpServer();
-  const transport = new SSEServerTransport('/message', res);
+  const endpoint = req.path || '/';
+  const transport = new SSEServerTransport(endpoint, res);
   
   transports.set(transport.sessionId, transport);
 
@@ -214,10 +215,9 @@ const handleMessage = async (req, res) => {
   let transport = transports.get(sessionId) || Array.from(transports.values())[0];
 
   if (transport) {
-    if (!req.url.includes('sessionId=')) {
-      const sep = req.url.includes('?') ? '&' : '?';
-      req.url = `${req.url}${sep}sessionId=${transport.sessionId}`;
-    }
+    // Acomodar la URL requerida internamente por el SDK de MCP
+    const endpoint = transport._endpoint || '/';
+    req.url = `${endpoint}?sessionId=${transport.sessionId}`;
 
     const origWriteHead = res.writeHead;
     res.writeHead = function(statusCode, ...args) {
@@ -253,6 +253,7 @@ app.get('/', handleSse);
 
 app.post('/message', handleMessage);
 app.post('/sse/message', handleMessage);
+app.post('/sse', handleMessage);
 app.post('/', handleMessage);
 
 const PORT = process.env.PORT || 3000;
