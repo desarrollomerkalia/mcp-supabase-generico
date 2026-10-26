@@ -313,3 +313,24 @@ const handleMessage = async (req, res) => {
       }
     }
   }
+
+  const sessionId = req.query.sessionId;
+  let transport = sessionId ? transports.get(sessionId) : Array.from(transports.values())[0];
+
+  if (transport) {
+    req.url = `/message?sessionId=${transport.sessionId}`;
+    await transport.handlePostMessage(req, res);
+  } else {
+    res.status(200).json({ jsonrpc: "2.0", result: {}, id: 1 });
+  }
+};
+
+app.post('/message', handleMessage);
+app.post('/sse/message', handleMessage);
+app.post('/sse', handleMessage);
+app.post('/', handleMessage);
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Servidor MCP genérico de Supabase corriendo en el puerto ${PORT}`);
+});
