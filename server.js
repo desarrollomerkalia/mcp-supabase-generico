@@ -8,12 +8,13 @@ import { createClient } from '@supabase/supabase-js';
 const app = express();
 app.use(cors());
 
-// Logger
+// Logger de consola para diagnóstico
 app.use((req, res, next) => {
   console.log(`[RDWAI] ${req.method} ${req.url}`);
   next();
 });
 
+// Guardar transportes SSE activos por sessionId
 const transports = new Map();
 
 function createMcpServer() {
@@ -25,6 +26,7 @@ function createMcpServer() {
   });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
+    console.log("[MCP] Enviando lista de 7 herramientas a RDWAI...");
     const credenciales = {
       supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
       supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" }
@@ -181,43 +183,46 @@ function createMcpServer() {
   return server;
 }
 
-// Respuestas a pings HEAD
+// Pings HEAD
 app.head('/', (req, res) => res.status(200).end());
 app.head('/sse', (req, res) => res.status(200).end());
 
-// Manejador SSE
+// Manejador GET de SSE
 const handleSse = async (req, res) => {
-  console.log(`[SSE GET] Nueva conexion desde ${req.url}`);
+  console.log(`[SSE GET] Nueva conexion SSE establecida desde ${req.url}`);
   const server = createMcpServer();
-  const endpoint = req.path || '/';
-  const transport = new SSEServerTransport(endpoint, res);
+  const transport = new SSEServerTransport('/message', res);
   
   transports.set(transport.sessionId, transport);
 
   const keepAlive = setInterval(() => {
-    res.write(': keepalive\n\n');
+    try {
+      res.write(': keepalive\n\n');
+    } catch (e) {}
   }, 15000);
   
   req.on('close', () => {
-    console.log(`[SSE CLOSE] Sesion finalizada ${transport.sessionId}`);
+    console.log(`[SSE CLOSE] Conexion cerrada: ${transport.sessionId}`);
     clearInterval(keepAlive);
     setTimeout(() => {
       transports.delete(transport.sessionId);
-    }, 10000);
+    }, 60000);
   });
 
   await server.connect(transport);
 };
 
-// Manejador POST
+// Manejador POST de mensajes MCP
 const handleMessage = async (req, res) => {
   const sessionId = req.query.sessionId;
-  let transport = transports.get(sessionId) || Array.from(transports.values())[0];
+  let transport = sessionId ? transports.get(sessionId) : null;
+  
+  if (!transport && transports.size > 0) {
+    transport = Array.from(transports.values())[transports.size - 1];
+  }
 
   if (transport) {
-    // Acomodar la URL requerida internamente por el SDK de MCP
-    const endpoint = transport._endpoint || '/';
-    req.url = `${endpoint}?sessionId=${transport.sessionId}`;
+    req.url = `/message?sessionId=${transport.sessionId}`;
 
     const origWriteHead = res.writeHead;
     res.writeHead = function(statusCode, ...args) {
@@ -236,10 +241,11 @@ const handleMessage = async (req, res) => {
           res.setHeader('Content-Type', 'application/json');
         } catch (e) {}
       }
-      if (chunk === 'Accepted' || chunk === 'Accepted\n' || !chunk) {
-        chunk = JSON.stringify({ status: "ok", message: "Accepted" });
+      let content = chunk;
+      if (typeof chunk === 'string' && (chunk.includes('Accepted') || chunk.trim() === '')) {
+        content = JSON.stringify({ status: "ok", message: "Accepted" });
       }
-      return origEnd.call(this, chunk, encoding, cb);
+      return origEnd.call(this, content, encoding, cb);
     };
 
     await transport.handlePostMessage(req, res);
