@@ -8,16 +8,15 @@ import { createClient } from '@supabase/supabase-js';
 const app = express();
 app.use(cors());
 
-// Logger
+// Logger de peticiones
 app.use((req, res, next) => {
-  console.log(`[RDWAI] Peticion: ${req.method} ${req.url}`);
+  console.log(`[RDWAI] ${req.method} ${req.url}`);
   next();
 });
 
-// Guardar los transportes activos por sesión
+// Guardar transportes activos por sesión
 const transports = new Map();
 
-// Fábrica para instanciar un servidor MCP limpio por cada conexión
 function createMcpServer() {
   const server = new Server({
     name: "Supabase-Generico-Completo-MCP",
@@ -183,11 +182,11 @@ function createMcpServer() {
   return server;
 }
 
-// Responder pings de salud HEAD de inmediato sin abrir transmisiones
+// Pings HEAD
 app.head('/', (req, res) => res.status(200).end());
 app.head('/sse', (req, res) => res.status(200).end());
 
-// Manejo de conexión SSE
+// Manejador SSE
 const handleSse = async (req, res) => {
   console.log(`[SSE GET] Nueva conexion desde ${req.url}`);
   const server = createMcpServer();
@@ -203,12 +202,16 @@ const handleSse = async (req, res) => {
   await server.connect(transport);
 };
 
-// Manejo de ejecución de herramientas
+// Manejador POST
 const handleMessage = async (req, res) => {
   const sessionId = req.query.sessionId;
-  const transport = transports.get(sessionId) || Array.from(transports.values())[0];
+  let transport = transports.get(sessionId) || Array.from(transports.values())[0];
 
   if (transport) {
+    if (!req.url.includes('sessionId=')) {
+      const sep = req.url.includes('?') ? '&' : '?';
+      req.url = `${req.url}${sep}sessionId=${transport.sessionId}`;
+    }
     await transport.handlePostMessage(req, res);
   } else {
     res.status(400).send("No hay transporte SSE activo disponible");
