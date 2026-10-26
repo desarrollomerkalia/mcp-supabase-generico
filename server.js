@@ -23,7 +23,7 @@ const TOOLS_LIST = [
       type: "object",
       properties: { 
         supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" },
+        supabaseKey: { type: "string", description: "Service Role Key" },
         tabla: { type: "string", description: "Nombre de la tabla" },
         columnas: { type: "string", description: "Columnas a devolver (ej. 'id, nombre')", default: "*" },
         filtros: { type: "object", description: "Filtros clave-valor (ej. {\"estado\": \"activo\"})" },
@@ -39,7 +39,7 @@ const TOOLS_LIST = [
       type: "object",
       properties: { 
         supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" },
+        supabaseKey: { type: "string", description: "Service Role Key" },
         tabla: { type: "string", description: "Nombre de la tabla" },
         datos: { type: "object", description: "JSON o Array con los datos" } 
       },
@@ -53,7 +53,7 @@ const TOOLS_LIST = [
       type: "object",
       properties: { 
         supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" },
+        supabaseKey: { type: "string", description: "Service Role Key" },
         tabla: { type: "string", description: "Nombre de la tabla" },
         columna_filtro: { type: "string", description: "Columna para buscar (ej. 'id')" },
         valor_filtro: { type: "string", description: "Valor a buscar" },
@@ -69,8 +69,8 @@ const TOOLS_LIST = [
       type: "object",
       properties: { 
         supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" },
-        tabla: { type: "string", description: "Nombre de la tabla" },
+        supabaseKey: { type: "string", description: "Service Role Key" },
+        tabla: { type: "string" },
         columna_filtro: { type: "string" },
         valor_filtro: { type: "string" }
       },
@@ -84,8 +84,8 @@ const TOOLS_LIST = [
       type: "object",
       properties: { 
         supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" },
-        tabla: { type: "string", description: "Nombre de la tabla" },
+        supabaseKey: { type: "string", description: "Service Role Key" },
+        tabla: { type: "string" },
         datos: { type: "object" } 
       },
       required: ["supabaseUrl", "supabaseKey", "tabla", "datos"]
@@ -93,14 +93,14 @@ const TOOLS_LIST = [
   },
   {
     name: "supabase_rpc",
-    description: "Ejecuta una función de Postgres (Stored Procedure).",
+    description: "Ejecuta una función de Postgres (Stored Procedure) ya existente.",
     inputSchema: {
       type: "object",
       properties: { 
         supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" },
+        supabaseKey: { type: "string", description: "Service Role Key" },
         funcion: { type: "string", description: "Nombre de la función RPC" },
-        parametros: { type: "object", description: "JSON con los parámetros de la función" }
+        parametros: { type: "object", description: "JSON con los parámetros" }
       },
       required: ["supabaseUrl", "supabaseKey", "funcion"]
     }
@@ -112,9 +112,22 @@ const TOOLS_LIST = [
       type: "object",
       properties: { 
         supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" }
+        supabaseKey: { type: "string", description: "Service Role Key" }
       },
       required: ["supabaseUrl", "supabaseKey"]
+    }
+  },
+  {
+    name: "supabase_ejecutar_sql",
+    description: "Ejecuta sentencias SQL arbitrarias (CREATE TABLE, ALTER TABLE, CREATE FUNCTION, etc.). Requiere la función exec_sql creada en Supabase.",
+    inputSchema: {
+      type: "object",
+      properties: { 
+        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
+        supabaseKey: { type: "string", description: "Service Role Key" },
+        sql: { type: "string", description: "Sentencia SQL completa a ejecutar" }
+      },
+      required: ["supabaseUrl", "supabaseKey", "sql"]
     }
   }
 ];
@@ -171,6 +184,12 @@ async function handleToolCall(name, args) {
     return [{ type: "text", text: JSON.stringify(data, null, 2) }];
   }
 
+  if (name === "supabase_ejecutar_sql") {
+    const { data, error } = await supabase.rpc('exec_sql', { sql_query: args.sql });
+    if (error) throw new Error(`Error ejecutando SQL: ${error.message}`);
+    return [{ type: "text", text: `Resultado SQL: ${JSON.stringify(data)}` }];
+  }
+
   throw new Error("Herramienta no encontrada");
 }
 
@@ -179,7 +198,7 @@ const transports = new Map();
 function createMcpServer() {
   const server = new Server({
     name: "Supabase-Generico-Completo-MCP",
-    version: "2.0.0"
+    version: "2.1.0"
   }, {
     capabilities: { tools: {} }
   });
@@ -197,11 +216,9 @@ function createMcpServer() {
   return server;
 }
 
-// Respuestas a pings HEAD
 app.head('/', (req, res) => res.status(200).end());
 app.head('/sse', (req, res) => res.status(200).end());
 
-// Respuestas a DELETE explícitas
 app.delete('/', (req, res) => res.status(200).json({ status: "ok" }));
 app.delete('/sse', (req, res) => res.status(200).json({ status: "ok" }));
 app.delete('/message', (req, res) => res.status(200).json({ status: "ok" }));
@@ -228,7 +245,6 @@ const handleSse = async (req, res) => {
 app.get('/sse', handleSse);
 app.get('/', handleSse);
 
-// Manejador POST directo (compatible con Streamable HTTP y JSON-RPC)
 const handleMessage = async (req, res) => {
   const body = req.body;
 
@@ -245,7 +261,7 @@ const handleMessage = async (req, res) => {
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "Supabase-Generico-Completo-MCP", version: "2.0.0" }
+          serverInfo: { name: "Supabase-Generico-Completo-MCP", version: "2.1.0" }
         }
       });
     }
@@ -255,7 +271,7 @@ const handleMessage = async (req, res) => {
     }
 
     if (method === 'tools/list') {
-      console.log("[JSON-RPC Directo] Entregando directamente las 7 herramientas en la respuesta POST!");
+      console.log("[JSON-RPC Directo] Entregando las 8 herramientas!");
       return res.status(200).json({
         jsonrpc: "2.0",
         id: id,
