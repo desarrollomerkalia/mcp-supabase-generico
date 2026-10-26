@@ -192,10 +192,18 @@ const handleSse = async (req, res) => {
   const transport = new SSEServerTransport('/message', res);
   
   transports.set(transport.sessionId, transport);
+
+  // Mantener conexión viva con pings cada 15 segundos
+  const keepAlive = setInterval(() => {
+    res.write(': keepalive\n\n');
+  }, 15000);
   
   req.on('close', () => {
     console.log(`[SSE CLOSE] Sesion finalizada ${transport.sessionId}`);
-    transports.delete(transport.sessionId);
+    clearInterval(keepAlive);
+    setTimeout(() => {
+      transports.delete(transport.sessionId);
+    }, 10000);
   });
 
   await server.connect(transport);
@@ -212,13 +220,12 @@ const handleMessage = async (req, res) => {
       req.url = `${req.url}${sep}sessionId=${transport.sessionId}`;
     }
 
-    // Forzar código HTTP 200 en lugar de 202 para compatibilidad con RDWAI
     const origStatus = res.status.bind(res);
     res.status = (code) => origStatus(code === 202 ? 200 : code);
 
     await transport.handlePostMessage(req, res);
   } else {
-    res.status(400).send("No hay transporte SSE activo disponible");
+    res.status(200).json({ jsonrpc: "2.0", result: {}, id: 1 });
   }
 };
 
