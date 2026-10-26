@@ -8,13 +8,12 @@ import { createClient } from '@supabase/supabase-js';
 const app = express();
 app.use(cors());
 
-// Logger de peticiones
+// Logger
 app.use((req, res, next) => {
   console.log(`[RDWAI] ${req.method} ${req.url}`);
   next();
 });
 
-// Guardar transportes activos por sesión
 const transports = new Map();
 
 function createMcpServer() {
@@ -182,7 +181,7 @@ function createMcpServer() {
   return server;
 }
 
-// Pings HEAD
+// Respuestas a pings HEAD
 app.head('/', (req, res) => res.status(200).end());
 app.head('/sse', (req, res) => res.status(200).end());
 
@@ -212,6 +211,11 @@ const handleMessage = async (req, res) => {
       const sep = req.url.includes('?') ? '&' : '?';
       req.url = `${req.url}${sep}sessionId=${transport.sessionId}`;
     }
+
+    // Forzar código HTTP 200 en lugar de 202 para compatibilidad con RDWAI
+    const origStatus = res.status.bind(res);
+    res.status = (code) => origStatus(code === 202 ? 200 : code);
+
     await transport.handlePostMessage(req, res);
   } else {
     res.status(400).send("No hay transporte SSE activo disponible");
