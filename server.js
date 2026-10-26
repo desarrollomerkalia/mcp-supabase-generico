@@ -7,14 +7,174 @@ import { createClient } from '@supabase/supabase-js';
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
-// Logger de consola para diagnóstico
+// Logger de diagnóstico
 app.use((req, res, next) => {
   console.log(`[RDWAI] ${req.method} ${req.url}`);
   next();
 });
 
-// Guardar transportes SSE activos por sessionId
+const TOOLS_LIST = [
+  {
+    name: "supabase_leer",
+    description: "Lee registros de una tabla con filtros opcionales.",
+    inputSchema: {
+      type: "object",
+      properties: { 
+        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
+        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" },
+        tabla: { type: "string", description: "Nombre de la tabla" },
+        columnas: { type: "string", description: "Columnas a devolver (ej. 'id, nombre')", default: "*" },
+        filtros: { type: "object", description: "Filtros clave-valor (ej. {\"estado\": \"activo\"})" },
+        limite: { type: "number", default: 50 } 
+      },
+      required: ["supabaseUrl", "supabaseKey", "tabla"]
+    }
+  },
+  {
+    name: "supabase_insertar",
+    description: "Inserta uno o múltiples registros en una tabla.",
+    inputSchema: {
+      type: "object",
+      properties: { 
+        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
+        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" },
+        tabla: { type: "string", description: "Nombre de la tabla" },
+        datos: { type: "object", description: "JSON o Array con los datos" } 
+      },
+      required: ["supabaseUrl", "supabaseKey", "tabla", "datos"]
+    }
+  },
+  {
+    name: "supabase_actualizar",
+    description: "Actualiza registros filtrando por una columna.",
+    inputSchema: {
+      type: "object",
+      properties: { 
+        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
+        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" },
+        tabla: { type: "string", description: "Nombre de la tabla" },
+        columna_filtro: { type: "string", description: "Columna para buscar (ej. 'id')" },
+        valor_filtro: { type: "string", description: "Valor a buscar" },
+        datos: { type: "object", description: "JSON con los datos a actualizar" }
+      },
+      required: ["supabaseUrl", "supabaseKey", "tabla", "columna_filtro", "valor_filtro", "datos"]
+    }
+  },
+  {
+    name: "supabase_eliminar",
+    description: "Elimina registros filtrando por una columna.",
+    inputSchema: {
+      type: "object",
+      properties: { 
+        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
+        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" },
+        tabla: { type: "string", description: "Nombre de la tabla" },
+        columna_filtro: { type: "string" },
+        valor_filtro: { type: "string" }
+      },
+      required: ["supabaseUrl", "supabaseKey", "tabla", "columna_filtro", "valor_filtro"]
+    }
+  },
+  {
+    name: "supabase_upsertar",
+    description: "Inserta un registro o lo actualiza si ya existe la clave primaria.",
+    inputSchema: {
+      type: "object",
+      properties: { 
+        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
+        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" },
+        tabla: { type: "string", description: "Nombre de la tabla" },
+        datos: { type: "object" } 
+      },
+      required: ["supabaseUrl", "supabaseKey", "tabla", "datos"]
+    }
+  },
+  {
+    name: "supabase_rpc",
+    description: "Ejecuta una función de Postgres (Stored Procedure).",
+    inputSchema: {
+      type: "object",
+      properties: { 
+        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
+        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" },
+        funcion: { type: "string", description: "Nombre de la función RPC" },
+        parametros: { type: "object", description: "JSON con los parámetros de la función" }
+      },
+      required: ["supabaseUrl", "supabaseKey", "funcion"]
+    }
+  },
+  {
+    name: "supabase_auth_listar_usuarios",
+    description: "Lista los usuarios de Auth (Requiere Service Role Key).",
+    inputSchema: {
+      type: "object",
+      properties: { 
+        supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
+        supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" }
+      },
+      required: ["supabaseUrl", "supabaseKey"]
+    }
+  }
+];
+
+async function handleToolCall(name, args) {
+  const { supabaseUrl, supabaseKey } = args;
+  const supabase = createClient(supabaseUrl, supabaseKey);
+
+  if (name === "supabase_leer") {
+    let query = supabase.from(args.tabla).select(args.columnas || '*').limit(args.limite || 50);
+    if (args.filtros) {
+      for (const [key, value] of Object.entries(args.filtros)) {
+        query = query.eq(key, value);
+      }
+    }
+    const { data, error } = await query;
+    if (error) throw error;
+    return [{ type: "text", text: JSON.stringify(data, null, 2) }];
+  } 
+  
+  if (name === "supabase_insertar") {
+    const { data, error } = await supabase.from(args.tabla).insert(args.datos).select();
+    if (error) throw error;
+    return [{ type: "text", text: `Insertado: ${JSON.stringify(data)}` }];
+  }
+
+  if (name === "supabase_actualizar") {
+    const { data, error } = await supabase.from(args.tabla).update(args.datos).eq(args.columna_filtro, args.valor_filtro).select();
+    if (error) throw error;
+    return [{ type: "text", text: `Actualizado: ${JSON.stringify(data)}` }];
+  }
+
+  if (name === "supabase_eliminar") {
+    const { data, error } = await supabase.from(args.tabla).delete().eq(args.columna_filtro, args.valor_filtro).select();
+    if (error) throw error;
+    return [{ type: "text", text: `Eliminado: ${JSON.stringify(data)}` }];
+  }
+
+  if (name === "supabase_upsertar") {
+    const { data, error } = await supabase.from(args.tabla).upsert(args.datos).select();
+    if (error) throw error;
+    return [{ type: "text", text: `Upsert exitoso: ${JSON.stringify(data)}` }];
+  }
+
+  if (name === "supabase_rpc") {
+    const { data, error } = await supabase.rpc(args.funcion, args.parametros || {});
+    if (error) throw error;
+    return [{ type: "text", text: `Resultado de función: ${JSON.stringify(data)}` }];
+  }
+
+  if (name === "supabase_auth_listar_usuarios") {
+    const { data, error } = await supabase.auth.admin.listUsers();
+    if (error) throw error;
+    return [{ type: "text", text: JSON.stringify(data, null, 2) }];
+  }
+
+  throw new Error("Herramienta no encontrada");
+}
+
+// Soporte SSE
 const transports = new Map();
 
 function createMcpServer() {
@@ -25,237 +185,110 @@ function createMcpServer() {
     capabilities: { tools: {} }
   });
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    console.log("[MCP] Enviando lista de 7 herramientas a RDWAI...");
-    const credenciales = {
-      supabaseUrl: { type: "string", description: "URL del proyecto Supabase" },
-      supabaseKey: { type: "string", description: "Service Role Key (recomendado para control total)" }
-    };
-    const tablaProp = { tabla: { type: "string", description: "Nombre de la tabla" } };
-
-    return {
-      tools: [
-        {
-          name: "supabase_leer",
-          description: "Lee registros de una tabla con filtros opcionales.",
-          inputSchema: {
-            type: "object",
-            properties: { 
-              ...credenciales, ...tablaProp, 
-              columnas: { type: "string", description: "Columnas a devolver (ej. 'id, nombre')", default: "*" },
-              filtros: { type: "object", description: "Filtros clave-valor (ej. {\"estado\": \"activo\"})" },
-              limite: { type: "number", default: 50 } 
-            },
-            required: ["supabaseUrl", "supabaseKey", "tabla"]
-          }
-        },
-        {
-          name: "supabase_insertar",
-          description: "Inserta uno o múltiples registros en una tabla.",
-          inputSchema: {
-            type: "object",
-            properties: { ...credenciales, ...tablaProp, datos: { type: "object", description: "JSON o Array con los datos" } },
-            required: ["supabaseUrl", "supabaseKey", "tabla", "datos"]
-          }
-        },
-        {
-          name: "supabase_actualizar",
-          description: "Actualiza registros filtrando por una columna.",
-          inputSchema: {
-            type: "object",
-            properties: { 
-              ...credenciales, ...tablaProp, 
-              columna_filtro: { type: "string", description: "Columna para buscar (ej. 'id')" },
-              valor_filtro: { type: "string", description: "Valor a buscar" },
-              datos: { type: "object", description: "JSON con los datos a actualizar" }
-            },
-            required: ["supabaseUrl", "supabaseKey", "tabla", "columna_filtro", "valor_filtro", "datos"]
-          }
-        },
-        {
-          name: "supabase_eliminar",
-          description: "Elimina registros filtrando por una columna.",
-          inputSchema: {
-            type: "object",
-            properties: { 
-              ...credenciales, ...tablaProp, 
-              columna_filtro: { type: "string" },
-              valor_filtro: { type: "string" }
-            },
-            required: ["supabaseUrl", "supabaseKey", "tabla", "columna_filtro", "valor_filtro"]
-          }
-        },
-        {
-          name: "supabase_upsertar",
-          description: "Inserta un registro o lo actualiza si ya existe la clave primaria.",
-          inputSchema: {
-            type: "object",
-            properties: { ...credenciales, ...tablaProp, datos: { type: "object" } },
-            required: ["supabaseUrl", "supabaseKey", "tabla", "datos"]
-          }
-        },
-        {
-          name: "supabase_rpc",
-          description: "Ejecuta una función de Postgres (Stored Procedure).",
-          inputSchema: {
-            type: "object",
-            properties: { 
-              ...credenciales, 
-              funcion: { type: "string", description: "Nombre de la función RPC" },
-              parametros: { type: "object", description: "JSON con los parámetros de la función" }
-            },
-            required: ["supabaseUrl", "supabaseKey", "funcion"]
-          }
-        },
-        {
-          name: "supabase_auth_listar_usuarios",
-          description: "Lista los usuarios de Auth (Requiere Service Role Key).",
-          inputSchema: {
-            type: "object",
-            properties: { ...credenciales },
-            required: ["supabaseUrl", "supabaseKey"]
-          }
-        }
-      ]
-    };
-  });
-
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS_LIST }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-    const { supabaseUrl, supabaseKey } = args;
-    const supabase = createClient(supabaseUrl, supabaseKey);
-
     try {
-      if (name === "supabase_leer") {
-        let query = supabase.from(args.tabla).select(args.columnas || '*').limit(args.limite || 50);
-        if (args.filtros) {
-          for (const [key, value] of Object.entries(args.filtros)) {
-            query = query.eq(key, value);
-          }
-        }
-        const { data, error } = await query;
-        if (error) throw error;
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-      } 
-      
-      if (name === "supabase_insertar") {
-        const { data, error } = await supabase.from(args.tabla).insert(args.datos).select();
-        if (error) throw error;
-        return { content: [{ type: "text", text: `Insertado: ${JSON.stringify(data)}` }] };
-      }
-
-      if (name === "supabase_actualizar") {
-        const { data, error } = await supabase.from(args.tabla).update(args.datos).eq(args.columna_filtro, args.valor_filtro).select();
-        if (error) throw error;
-        return { content: [{ type: "text", text: `Actualizado: ${JSON.stringify(data)}` }] };
-      }
-
-      if (name === "supabase_eliminar") {
-        const { data, error } = await supabase.from(args.tabla).delete().eq(args.columna_filtro, args.valor_filtro).select();
-        if (error) throw error;
-        return { content: [{ type: "text", text: `Eliminado: ${JSON.stringify(data)}` }] };
-      }
-
-      if (name === "supabase_upsertar") {
-        const { data, error } = await supabase.from(args.tabla).upsert(args.datos).select();
-        if (error) throw error;
-        return { content: [{ type: "text", text: `Upsert exitoso: ${JSON.stringify(data)}` }] };
-      }
-
-      if (name === "supabase_rpc") {
-        const { data, error } = await supabase.rpc(args.funcion, args.parametros || {});
-        if (error) throw error;
-        return { content: [{ type: "text", text: `Resultado de función: ${JSON.stringify(data)}` }] };
-      }
-
-      if (name === "supabase_auth_listar_usuarios") {
-        const { data, error } = await supabase.auth.admin.listUsers();
-        if (error) throw error;
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-      }
-
-      throw new Error("Herramienta no encontrada");
+      const content = await handleToolCall(request.params.name, request.params.arguments);
+      return { content };
     } catch (error) {
-      return { content: [{ type: "text", text: `Error de Supabase: ${error.message}` }], isError: true };
+      return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
     }
   });
 
   return server;
 }
 
-// Pings HEAD
 app.head('/', (req, res) => res.status(200).end());
 app.head('/sse', (req, res) => res.status(200).end());
+app.delete('/*', (req, res) => res.status(200).json({ status: "ok" }));
 
-// Manejador GET de SSE
 const handleSse = async (req, res) => {
-  console.log(`[SSE GET] Nueva conexion SSE establecida desde ${req.url}`);
+  console.log(`[SSE GET] Nueva conexion desde ${req.url}`);
   const server = createMcpServer();
   const transport = new SSEServerTransport('/message', res);
-  
   transports.set(transport.sessionId, transport);
 
   const keepAlive = setInterval(() => {
-    try {
-      res.write(': keepalive\n\n');
-    } catch (e) {}
+    try { res.write(': keepalive\n\n'); } catch (e) {}
   }, 15000);
   
   req.on('close', () => {
-    console.log(`[SSE CLOSE] Conexion cerrada: ${transport.sessionId}`);
+    console.log(`[SSE CLOSE] Sesion cerrada ${transport.sessionId}`);
     clearInterval(keepAlive);
-    setTimeout(() => {
-      transports.delete(transport.sessionId);
-    }, 60000);
+    setTimeout(() => transports.delete(transport.sessionId), 60000);
   });
 
   await server.connect(transport);
 };
 
-// Manejador POST de mensajes MCP
+app.get('/sse', handleSse);
+app.get('/', handleSse);
+
+// Manejador POST directo (compatible con Streamable HTTP y JSON-RPC)
 const handleMessage = async (req, res) => {
-  const sessionId = req.query.sessionId;
-  let transport = sessionId ? transports.get(sessionId) : null;
-  
-  if (!transport && transports.size > 0) {
-    transport = Array.from(transports.values())[transports.size - 1];
+  const body = req.body;
+
+  if (body && typeof body === 'object' && body.jsonrpc === '2.0') {
+    const id = body.id !== undefined ? body.id : null;
+    const method = body.method;
+
+    console.log(`[JSON-RPC Directo] Procesando método: ${method}`);
+
+    if (method === 'initialize') {
+      return res.status(200).json({
+        jsonrpc: "2.0",
+        id: id,
+        result: {
+          protocolVersion: "2024-11-05",
+          capabilities: { tools: {} },
+          serverInfo: { name: "Supabase-Generico-Completo-MCP", version: "2.0.0" }
+        }
+      });
+    }
+
+    if (method === 'notifications/initialized') {
+      return res.status(200).json({ jsonrpc: "2.0", result: {} });
+    }
+
+    if (method === 'tools/list') {
+      console.log("[JSON-RPC Directo] Entregando directamente las 7 herramientas en la respuesta POST!");
+      return res.status(200).json({
+        jsonrpc: "2.0",
+        id: id,
+        result: { tools: TOOLS_LIST }
+      });
+    }
+
+    if (method === 'tools/call') {
+      try {
+        const { name, arguments: args } = body.params || {};
+        const content = await handleToolCall(name, args);
+        return res.status(200).json({
+          jsonrpc: "2.0",
+          id: id,
+          result: { content }
+        });
+      } catch (error) {
+        return res.status(200).json({
+          jsonrpc: "2.0",
+          id: id,
+          error: { code: -32603, message: error.message }
+        });
+      }
+    }
   }
+
+  // Fallback a transporte SSE si aplica
+  const sessionId = req.query.sessionId;
+  let transport = sessionId ? transports.get(sessionId) : Array.from(transports.values())[0];
 
   if (transport) {
     req.url = `/message?sessionId=${transport.sessionId}`;
-
-    const origWriteHead = res.writeHead;
-    res.writeHead = function(statusCode, ...args) {
-      if (!res.headersSent) {
-        try {
-          res.setHeader('Content-Type', 'application/json');
-        } catch (e) {}
-      }
-      return origWriteHead.call(this, 200, ...args);
-    };
-
-    const origEnd = res.end;
-    res.end = function(chunk, encoding, cb) {
-      if (!res.headersSent) {
-        try {
-          res.setHeader('Content-Type', 'application/json');
-        } catch (e) {}
-      }
-      let content = chunk;
-      if (typeof chunk === 'string' && (chunk.includes('Accepted') || chunk.trim() === '')) {
-        content = JSON.stringify({ status: "ok", message: "Accepted" });
-      }
-      return origEnd.call(this, content, encoding, cb);
-    };
-
     await transport.handlePostMessage(req, res);
   } else {
-    res.status(200).json({ status: "ok", message: "Accepted" });
+    res.status(200).json({ jsonrpc: "2.0", result: {}, id: 1 });
   }
 };
-
-app.get('/sse', handleSse);
-app.get('/', handleSse);
 
 app.post('/message', handleMessage);
 app.post('/sse/message', handleMessage);
