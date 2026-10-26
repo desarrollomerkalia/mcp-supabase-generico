@@ -219,16 +219,24 @@ const handleMessage = async (req, res) => {
       req.url = `${req.url}${sep}sessionId=${transport.sessionId}`;
     }
 
-    // Interceptar cabeceras y cuerpo para garantizar respuesta HTTP 200 en JSON válido
     const origWriteHead = res.writeHead;
     res.writeHead = function(statusCode, ...args) {
+      if (!res.headersSent) {
+        try {
+          res.setHeader('Content-Type', 'application/json');
+        } catch (e) {}
+      }
       return origWriteHead.call(this, 200, ...args);
     };
 
     const origEnd = res.end;
     res.end = function(chunk, encoding, cb) {
-      res.setHeader('Content-Type', 'application/json');
-      if (chunk === 'Accepted' || !chunk) {
+      if (!res.headersSent) {
+        try {
+          res.setHeader('Content-Type', 'application/json');
+        } catch (e) {}
+      }
+      if (chunk === 'Accepted' || chunk === 'Accepted\n' || !chunk) {
         chunk = JSON.stringify({ status: "ok", message: "Accepted" });
       }
       return origEnd.call(this, chunk, encoding, cb);
