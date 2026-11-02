@@ -2,10 +2,15 @@
 
 Este documento es para ti (o para quien administre otro tenant), no para los
 constructores de empleados. Asume que ya tienes acceso de administrador a ese
-tenant y que el conector `sgmcp` (MCP genérico, catálogo id 51,
+tenant y que el conector `sgmcp` (MCP genérico,
 `https://mcp-supabase-generico.onrender.com`) ya existe ahí de forma idéntica
 — por eso este documento NO incluye pasos para crear o configurar el
-conector, solo el skill.
+conector, solo el skill. El servidor y su código son los mismos en todos los
+tenants, pero **el número de id de catálogo NO lo es** - cada tenant numera su
+propio catálogo de conectores por separado (confirmado: en un tenant nuevo,
+"catálogo id 51" no devolvió nada, aunque el conector sí existía ahí bajo
+otro id). Identifícalo siempre por nombre (`sgmcp`) o por URL, nunca por
+número.
 
 Repite este procedimiento una vez por cada tenant nuevo. No hay dependencia
 entre tenants: el skill publicado en el tenant A no es visible ni reutilizable
@@ -85,6 +90,14 @@ Haz esto, en orden:
      para cualquier empleado de este tenant, no atado a un agente específico)
    - description: usa literalmente el campo "description" del frontmatter de
      SKILL.md, sin resumirlo ni reescribirlo.
+   Si la plataforma de este tenant devuelve el borrador con
+   `scope: "orphaned"` y sin campo `kind`, aunque enviaste exactamente
+   `kind: "functional"` sin `owner_agent_id`: es un comportamiento ya visto
+   en al menos un tenant y confirmado como cosmético, no bloqueante. No lo
+   trates como motivo para pausar ni para pedir corrección a un
+   administrador - continúa con el paso 4 y verifica al final (paso 6) si
+   el skill queda seleccionable en "Skills adicionales"; eso es lo único
+   que de verdad importa.
 4. Sube como contenido de la versión del skill la carpeta completa tal como
    te la entregué, con la misma estructura de archivos y carpetas
    (SKILL.md, VERSION, assets/, procedures/, checks/, tests/). No
@@ -99,9 +112,10 @@ Haz esto, en orden:
    - el nombre exacto, kind y versión con los que quedó publicado
    - que aparece en el selector de "Skills adicionales" al iniciar una
      sesión nueva de construcción de empleado en este tenant
-   - que el conector sgmcp (catálogo id 51) ya existe en este tenant de
-     forma independiente a este skill (solo confírmalo, no lo crees ni lo
-     modifiques)
+   - que el conector sgmcp ya existe en este tenant de forma independiente
+     a este skill (solo confírmalo, no lo crees ni lo modifiques) -
+     búscalo por nombre o por URL, no por número de id de catálogo: ese
+     número es propio de cada tenant, no es el mismo en todos
 
 No interpretes, resumas ni "arregles" nada del contenido del skill. Si algo
 en el proceso de publicación te obliga a cambiar un archivo para que pase
@@ -114,16 +128,36 @@ centralmente, no por tenant.
 
 Pide evidencia textual/literal (captura o copia del listado), no la
 paráfrasis del modelo:
-- El skill aparece listado con el nombre, `kind: functional` y la versión
-  correctos.
+- El skill aparece listado con el nombre y la versión correctos.
 - Al abrir una sesión nueva de construcción de empleado en ese tenant, el
   skill aparece como opción seleccionable en "Skills adicionales".
+- El conector sgmcp también aparece seleccionable ahí, apuntando a la URL
+  correcta (sin importar bajo qué id de catálogo).
 
 Si algo de esto falla, no lo arregles manualmente dentro de ese tenant —
 vuelve aquí, corrige la causa en este repo (`adapter/` o la carpeta del
 skill), corre `sync_assets.sh`, re-empaqueta y repite el proceso. La regla
 dura del skill aplica también a su propia publicación: los ajustes se hacen
 una vez, centralmente, no tenant por tenant.
+
+### Troubleshooting: el borrador queda con `scope: "orphaned"` en vez de `kind: functional`
+
+Observado al menos una vez en un tenant nuevo: al crear el skill con
+`kind: "functional"` y sin `owner_agent_id` (paso 3), tanto la creación
+como la consulta posterior devuelven `scope: "orphaned"` y sin campo
+`kind` en absoluto - la plataforma parece ignorar o no soportar esa
+clasificación en algunas instancias. **Confirmado que esto no bloquea
+nada**: el skill publicado con ese `scope` igual apareció seleccionable en
+"Skills adicionales" para una sesión nueva de construcción de empleado, y
+el conector sgmcp apareció igual de seleccionable junto a él.
+
+No vale la pena pausar ni escalar a un administrador solo por ver
+`scope: orphaned` - es cosmético hasta que se demuestre lo contrario.
+Antes de pausar o escalar, verifica directamente lo único que importa: si
+el skill aparece seleccionable en "Skills adicionales" de una sesión
+nueva. Si aparece, sigue adelante con normalidad. Solo si NO aparece
+seleccionable ahí es un bloqueo real que justifica pedir confirmación al
+administrador o proveedor de esa instancia.
 
 ## 5. Publicar una actualización futura (versión 1.0.x+1) en un tenant que ya tiene el skill
 
