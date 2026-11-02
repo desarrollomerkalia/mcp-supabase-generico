@@ -55,7 +55,11 @@ def tool_catalogue(config: ConnectionConfig) -> list:
         "name": "leer_registros",
         "description": (
             "Consulta registros de una tabla permitida; solo devuelve las columnas declaradas. "
-            "Columnas filtrables por tabla: " + _table_hint(config, writable_only=False) + "."
+            "Columnas filtrables por tabla: " + _table_hint(config, writable_only=False) + ". "
+            "En modo rls_personal, un resultado con 0 filas puede significar que la tabla esta "
+            "vacia O que las politicas de RLS ocultan las filas a esta cuenta - son indistinguibles. "
+            "No afirmes que la tabla esta vacia; indica que no se encontraron registros visibles "
+            "para esta cuenta."
         ),
         "inputSchema": {
             "type": "object", "additionalProperties": False,
@@ -78,6 +82,26 @@ def tool_catalogue(config: ConnectionConfig) -> list:
             "name": "insertar_registros",
             "description": (
                 "Inserta un registro en una tabla permitida, solo con columnas escribibles. "
+                "Tablas y columnas escribibles: " + _table_hint(config, writable_only=True) + "."
+            ),
+            "inputSchema": {
+                "type": "object", "additionalProperties": False,
+                "required": ["run_token", "tabla", "datos"],
+                "properties": {
+                    "run_token": {"type": "string"},
+                    "tabla": _table_property(writable_tables),
+                    "datos": {"type": "object"},
+                },
+            },
+            "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        })
+
+    if config.allows("upsertar_registros"):
+        tools.append({
+            "name": "upsertar_registros",
+            "description": (
+                "Inserta un registro en una tabla permitida, o lo actualiza si ya existe una fila "
+                "con la misma llave, solo con columnas escribibles. "
                 "Tablas y columnas escribibles: " + _table_hint(config, writable_only=True) + "."
             ),
             "inputSchema": {

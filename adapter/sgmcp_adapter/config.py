@@ -16,7 +16,9 @@ AUTH_MODES = ("rls_personal", "service_role")
 
 # Tools an administrator can deny per employee. Reading is controlled by
 # which tables/columns are declared, not by a separate deny flag.
-DENIABLE_TOOLS = frozenset({"insertar_registros", "actualizar_registros", "eliminar_registros"})
+DENIABLE_TOOLS = frozenset({
+    "insertar_registros", "actualizar_registros", "eliminar_registros", "upsertar_registros",
+})
 
 _TYPES = ("string", "integer", "number", "boolean")
 
