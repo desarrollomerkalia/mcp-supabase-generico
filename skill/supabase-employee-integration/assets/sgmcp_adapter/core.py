@@ -693,18 +693,23 @@ class Adapter:
                 payload["orden_columna"] = order_column
             return "supabase_leer", payload, False
 
-        if tool in {"insertar_registros", "actualizar_registros"}:
-            expected = {"tabla", "datos"} if tool == "insertar_registros" else {"tabla", "columna_filtro", "valor_filtro", "datos"}
+        if tool in {"insertar_registros", "actualizar_registros", "upsertar_registros"}:
+            expected = (
+                {"tabla", "datos"} if tool in {"insertar_registros", "upsertar_registros"}
+                else {"tabla", "columna_filtro", "valor_filtro", "datos"}
+            )
             if set(args) - expected or "tabla" not in args or "datos" not in args:
                 raise AdapterError("Argumentos no permitidos.")
             table = args.get("tabla")
             table_config = self.config.tables.get(table) if isinstance(table, str) else None
             if table_config is None or not table_config.writable:
                 raise AdapterError("Tabla no permitida para escritura.")
-            data = self._validated_data(table_config, args.get("datos"), insert=tool == "insertar_registros")
+            data = self._validated_data(table_config, args.get("datos"), insert=tool != "actualizar_registros")
             payload = {"tabla": table, "datos": data}
             if tool == "insertar_registros":
                 return "supabase_insertar", payload, True
+            if tool == "upsertar_registros":
+                return "supabase_upsertar", payload, True
             column, value = args.get("columna_filtro"), args.get("valor_filtro")
             if column not in table_config.filterable or isinstance(value, bool) or not isinstance(value, (str, int)):
                 raise AdapterError("Filtro de actualizacion no permitido.")
@@ -826,7 +831,7 @@ class Adapter:
                     "userToken": session.access_token,
                 })
             except MCPError as error:
-                failure = (error.kind, error.retryable, error.phase, error.http_status)
+                failure = (error.kind, error.retryable, error.phase, error.http_status, error.tool_error_text)
             except AdapterError as error:
                 if write_context is not None:
                     error.write_state = "unknown"
@@ -850,11 +855,13 @@ class Adapter:
                 "supabaseKey": self.settings.service_role_key,
             })
         except MCPError as error:
-            raise self._mcp_failure_error(mcp_tool, (error.kind, error.retryable, error.phase, error.http_status))
+            raise self._mcp_failure_error(
+                mcp_tool, (error.kind, error.retryable, error.phase, error.http_status, error.tool_error_text),
+            )
         return self._redact(result, self.settings.service_role_key)
 
     def _mcp_failure_error(self, mcp_tool, failure):
-        kind, retryable, phase, http_status = failure
+        kind, retryable, phase, http_status, tool_error_text = failure
         diagnostic = (" Fase MCP: %s." % phase if phase else "")
         if http_status is not None:
             diagnostic += " HTTP %s." % http_status
@@ -863,8 +870,31 @@ class Adapter:
                 error = AdapterError("No se envio la escritura: fallo la conexion MCP antes de llamar a la herramienta de datos." + diagnostic)
                 error.code, error.write_state = "supabase_write_not_sent", "not_sent"
                 return error
+            # A row-level-security rejection is not ambiguous: Postgres refused the
+            # write with certainty, before anything was committed. Only this one,
+            # stable, well-known Postgres message is special-cased - anything else
+            # keeps the generic, cautious "unknown" treatment below, unchanged.
+            if tool_error_text and "row-level security policy" in tool_error_text.lower():
+                error = AdapterError(
+                    "Supabase rechazo la escritura: las politicas de seguridad (RLS) no permiten "
+                    "que esta cuenta escriba en esta tabla. No se guardo nada; no hace falta "
+                    "reintentar. Si crees que deberias tener permiso, contacta a un administrador."
+                    + diagnostic
+                )
+                error.code, error.write_state = "supabase_write_rejected_rls", "not_sent"
+                return error
             error = AdapterError("sgmcp no confirmo la escritura. No se reintento; consulta el registro para verificar su estado." + diagnostic)
             error.write_state = "unknown"
+            # Same admin-only, fail-closed exposure tools.py already applies to
+            # response_shape on read failures (see wai_identity.active_chat_email +
+            # diagnostic_authorizer there) - reused here so an admin can see the
+            # raw text behind an unclassified write failure without us having to
+            # guess at Postgres' exact wording again next time this happens.
+            error.response_shape = {
+                "schema": "sgmcp_write_error_v1", "kind": kind, "phase": phase,
+                "http_status": http_status,
+                "tool_error_text": tool_error_text[:500] if tool_error_text else None,
+            }
             return error
         if retryable:
             code, message = "sgmcp_read_unavailable", "No se pudo completar la lectura por un fallo temporal de comunicacion con sgmcp. No se modificaron registros."

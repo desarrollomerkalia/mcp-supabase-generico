@@ -1,6 +1,6 @@
 ---
 name: supabase-employee-integration
-description: Carga este skill cuando el encargo de un empleado requiera leer o escribir datos en un proyecto de Supabase a través del conector sgmcp (MCP genérico, catálogo id 51, https://mcp-supabase-generico.onrender.com). Integra el paquete sgmcp_adapter en el backend del empleado, con sesión personal de Supabase Auth o credencial de servicio administrada, y deja los endpoints de configuración listos para que un administrador declare URL, llaves y el allowlist de tablas/columnas. No define lógica de negocio.
+description: Carga este skill cuando el encargo de un empleado requiera leer o escribir datos en un proyecto de Supabase a través del conector sgmcp (MCP genérico, https://mcp-supabase-generico.onrender.com - identifícalo por URL o nombre, el id de catálogo varía por tenant). Integra el paquete sgmcp_adapter en el backend del empleado, con sesión personal de Supabase Auth o credencial de servicio administrada, y deja los endpoints de configuración listos para que un administrador declare URL, llaves y el allowlist de tablas/columnas. No define lógica de negocio.
 ---
 
 # Integración De Empleados Con Supabase (vía sgmcp)
@@ -10,10 +10,11 @@ description: Carga este skill cuando el encargo de un empleado requiera leer o e
 Probado en un empleado real (`prueba-notas-supabase`): lectura y creación
 de registros desde una conversación de chat real, en **ambos** modos de
 autenticación (`rls_personal` y `service_role`), contra un proyecto real
-de Supabase. Dos bugs reales se encontraron y corrigieron en el camino -
-documentados aquí para que nadie los reintroduzca (no se referencia un
-número de versión fijo a propósito: este documento se reedita en cada
-versión nueva, un número fijo aquí queda desactualizado de inmediato):
+de Supabase. Varios hallazgos reales se encontraron y corrigieron en el
+camino - documentados aquí para que nadie los reintroduzca (no se
+referencia un número de versión fijo a propósito: este documento se
+reedita en cada versión nueva, un número fijo aquí queda desactualizado de
+inmediato):
 
 1. **Catálogo de tools oculto hasta configurar** (ya corregido, se
    registran siempre): una versión anterior no registraba ninguna
@@ -22,7 +23,7 @@ versión nueva, un número fijo aquí queda desactualizado de inmediato):
    agente descubre el catálogo de `app-tools` una sola vez, al desplegar
    - antes de que cualquier administrador haya configurado nada - ese
    catálogo vacío quedaba fijo para siempre, y el chat nunca podía usar
-   las herramientas aunque se configuraran después. Las cuatro ahora se
+   las herramientas aunque se configuraran después. Las cinco ahora se
    registran siempre, desde el arranque; `core.Adapter` sigue rechazando
    en tiempo de ejecución cualquier tabla no permitida.
 2. **`service_role` pasaba `None` a la verificación de paginación**
@@ -32,6 +33,36 @@ versión nueva, un número fijo aquí queda desactualizado de inmediato):
    siempre, con `sgmcp_read_response_invalid`. `rls_personal` nunca tuvo
    este bug. Hay una prueba de regresión (`tests/test_adapter_smoke.py`)
    que reproduce el error exacto contra el código anterior.
+3. **`upsertar_registros` agregada** (quinta tool genérica): faltaba
+   envolver `supabase_upsertar` del MCP - mismo allowlist de columnas
+   escribibles que ya usan insertar/actualizar, sin ningún concepto de
+   permisos nuevo.
+4. **Rechazo de escritura por RLS reportaba un mensaje genérico y
+   confuso** (corregido en esta versión): cualquier falla de escritura,
+   sin distinguir causa, caía en el mismo mensaje cauteloso de "no se
+   pudo confirmar, no reintentar" (`write_state="unknown"`) pensado para
+   fallas de red genuinamente ambiguas - incluso cuando Postgres había
+   rechazado la escritura con certeza por una política RLS. Ahora ese
+   patrón específico y estable de Postgres se detecta y se reporta como
+   `write_state="not_sent"` con un mensaje claro de permisos denegados;
+   cualquier otra causa de falla sigue devolviendo exactamente el mensaje
+   genérico de siempre (hay una prueba de regresión explícita para esto).
+   De forma análoga, `leer_registros` ahora aclara en su descripción que,
+   en modo `rls_personal`, un resultado de 0 filas puede ser una tabla
+   vacía o filas ocultas por RLS - indistinguibles técnicamente, pero el
+   modelo ya no debe afirmar que la tabla está vacía.
+5. **El punto 4 tardó dos intentos en corregirse de verdad** (corregido en
+   esta versión): la primera versión del fix de RLS nunca se activaba en
+   producción. Causa real, confirmada con el texto crudo del error vía el
+   diagnóstico admin-only agregado para esto mismo: `server.js` tiene DOS
+   manejadores distintos de `tools/call` - uno del SDK oficial (que envuelve
+   errores como `{content:[...], isError:true}`, lo único que el adaptador
+   sabía leer) y otro, el manejador JSON-RPC directo por POST, que es el que
+   **de verdad usa este adaptador** ("Streamable HTTP") y envuelve CUALQUIER
+   error - incluida una violación de RLS - como un error a nivel JSON-RPC
+   (`{error: {code, message}}`), un formato completamente distinto. El texto
+   de Postgres viajaba hasta nosotros todo este tiempo; simplemente nunca se
+   leía de esa rama. `mcp_client.py` ahora captura el texto en ambos formatos.
 
 ## Cuándo se aplica
 - El encargo del empleado menciona Supabase, una base de datos Postgres gestionada por Supabase, o el conector `sgmcp`.
@@ -39,7 +70,7 @@ versión nueva, un número fijo aquí queda desactualizado de inmediato):
 
 ## Contrato
 - **Entra:** un backend de empleado ya generado desde la plantilla de `wai-agent-app-builder` (con `app/main.py` real, no la plantilla del constructor), sin lógica de Supabase previa.
-- **Sale:** el backend con `sgmcp_adapter` integrado, las rutas `/api/supabase/session` y `/api/supabase/configuration` activas, y las cuatro herramientas genéricas (`leer_registros`, `insertar_registros`, `actualizar_registros`, `eliminar_registros`) **ya registradas en el catálogo MCP desde el primer despliegue** - deliberado, no un descuido: el runtime del agente descubre ese catálogo una sola vez, al arrancar, y nunca lo vuelve a consultar (ver la limitación bloqueante arriba). Antes de que se configure al menos una tabla, las cuatro existen en el catálogo pero `core.Adapter` rechaza cualquier llamada real ("tabla no permitida") - el rechazo pasa en tiempo de ejecución, no ocultando la herramienta. Una versión anterior de este skill sí las ocultaba hasta configurar - se revirtió porque eso era, con alta probabilidad, la causa real de la limitación bloqueante.
+- **Sale:** el backend con `sgmcp_adapter` integrado, las rutas `/api/supabase/session` y `/api/supabase/configuration` activas, y las cinco herramientas genéricas (`leer_registros`, `insertar_registros`, `actualizar_registros`, `eliminar_registros`, `upsertar_registros`) **ya registradas en el catálogo MCP desde el primer despliegue** - deliberado, no un descuido: el runtime del agente descubre ese catálogo una sola vez, al arrancar, y nunca lo vuelve a consultar (ver el punto 1 de la sección de verificación arriba). Antes de que se configure al menos una tabla, las cinco existen en el catálogo pero `core.Adapter` rechaza cualquier llamada real ("tabla no permitida") - el rechazo pasa en tiempo de ejecución, no ocultando la herramienta. Una versión anterior de este skill sí las ocultaba hasta configurar - se revirtió porque eso era, con alta probabilidad, la causa real de un bloqueo observado antes.
 - **Costo real de usar este skill (a la fecha):** la plantilla actual no tiene un punto de extensión sancionado para esto. Integrar este skill modifica el archivo invariante `app/main.py`, lo cual exige declarar una divergencia en `agent_app.notes.divergences[]` **con aprobación humana explícita** (`approver_email` real, nunca autoaprobada por el constructor), y deja a ese empleado marcado permanentemente como fork de la plantilla para ese archivo - el verificador de invariantes seguirá fallando esa comparación a propósito, y `--fix-invariants` nunca debe correrse sobre ese empleado. No es "solo contexto de negocio y listo" hasta que el proveedor de la plantilla (usewai.com) agregue un hook oficial - ver `../FEATURE_REQUEST_EXTENSION_POINT.md` (fuera de este paquete, no es contenido del skill) para la solicitud ya redactada.
 - **Acomodación conocida a una regla del verificador general del constructor:** la sección "Forbidden patterns" de `verify_generated_app.sh` prohíbe el texto literal `/v1/` en `src/backend` fuera de 5 archivos listados por nombre (pensada para impedir llamadas directas a APIs de proveedores de LLM, que suelen usar rutas `/v1/`, saltándose `agent_proxy.py`). Es una búsqueda de texto, no un análisis de qué hace el código, así que también atrapaba las llamadas legítimas de `sgmcp_adapter` a la propia API de Supabase (`/auth/v1/`, `/rest/v1/`) - que no tienen relación con el runtime del agente. Desde la v1.0.2, `core.py` construye esas rutas por concatenación (`"/auth/" + "v1" + "/"`) en vez de como una cadena literal, para que el texto `/v1/` no aparezca pegado en el archivo fuente. El comportamiento no cambia en nada - mismas URLs, misma llamada. Ya se le pidió al proveedor (`../FEATURE_REQUEST_EXTENSION_POINT.md`) que corrija la regla; esto es un acomodo documentado mientras tanto, no la solución definitiva.
 - **Procedimiento del backend:** `procedures/integrate.md`.

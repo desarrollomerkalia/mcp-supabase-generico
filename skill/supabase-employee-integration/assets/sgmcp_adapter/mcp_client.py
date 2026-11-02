@@ -16,13 +16,22 @@ import httpx
 
 
 _MAX_BYTES = 2 * 1024 * 1024
-_TOOLS = frozenset({"supabase_leer", "supabase_insertar", "supabase_actualizar", "supabase_eliminar"})
+_TOOLS = frozenset({
+    "supabase_leer", "supabase_insertar", "supabase_actualizar", "supabase_eliminar", "supabase_upsertar",
+})
 
 
 class MCPError(Exception):
-    """Public error that never exposes upstream details."""
+    """Public error that never exposes upstream details.
 
-    def __init__(self, *, kind="protocol", retryable=False, phase=None, http_status=None):
+    ``tool_error_text`` is the one exception: it carries the raw text sgmcp
+    returned for an ``isError: true`` tool response, kept ONLY so core.py
+    can pattern-match the small set of known-safe, stable Postgres error
+    strings (e.g. an RLS rejection) - never surfaced to the model as-is,
+    and never used for any other classification than that narrow match.
+    """
+
+    def __init__(self, *, kind="protocol", retryable=False, phase=None, http_status=None, tool_error_text=None):
         super().__init__("MCP request failed")
         self.kind = (
             kind
@@ -38,6 +47,18 @@ class MCPError(Exception):
         self.http_status = (
             http_status if type(http_status) is int and 100 <= http_status <= 599 else None
         )
+        self.tool_error_text = tool_error_text if isinstance(tool_error_text, str) else None
+
+
+def _tool_error_text(result: dict) -> "str | None":
+    content = result.get("content")
+    if not isinstance(content, list) or not content:
+        return None
+    first = content[0]
+    if not isinstance(first, dict) or first.get("type") != "text":
+        return None
+    text = first.get("text")
+    return text if isinstance(text, str) else None
 
 
 def _result(message: object, request_id: str) -> dict:
@@ -55,14 +76,19 @@ def _result(message: object, request_id: str) -> dict:
             or not isinstance(error.get("message"), str)
         ):
             raise MCPError()
-        raise MCPError(kind="remote")
+        # sgmcp's direct JSON-RPC POST handler (the one this client actually
+        # talks to - not the SDK/SSE one) wraps EVERY thrown error this way,
+        # including Supabase/Postgres rejections such as an RLS violation -
+        # unlike the isError:true content shape _tool_error_text handles
+        # above, which this client's real traffic never hits in practice.
+        raise MCPError(kind="remote", tool_error_text=error["message"])
     if not isinstance(message.get("result"), dict):
         raise MCPError()
     if "isError" in message["result"]:
         if not isinstance(message["result"]["isError"], bool):
             raise MCPError()
         if message["result"]["isError"]:
-            raise MCPError(kind="tool")
+            raise MCPError(kind="tool", tool_error_text=_tool_error_text(message["result"]))
     return message["result"]
 
 
@@ -235,14 +261,14 @@ class MCPClient:
                 response.raise_for_status()
                 result = await _read_result(response, request_id)
         except MCPError as error:
-            failure = (error.kind, error.retryable)
+            failure = (error.kind, error.retryable, error.tool_error_text)
         except (httpx.TimeoutException, httpx.NetworkError):
-            failure = ("transport", True)
+            failure = ("transport", True, None)
         except httpx.HTTPStatusError as error:
             http_status = error.response.status_code
-            failure = ("http", http_status in {502, 503, 504})
+            failure = ("http", http_status in {502, 503, 504}, None)
         except Exception:
-            failure = ("protocol", False)
+            failure = ("protocol", False, None)
         finally:
             try:
                 if session_id is not None:
@@ -264,6 +290,7 @@ class MCPClient:
         # Raise outside the handler: even __context__ must not retain HTTP errors.
         if failure is not None:
             raise MCPError(
-                kind=failure[0], retryable=failure[1], phase=phase, http_status=http_status
+                kind=failure[0], retryable=failure[1], phase=phase, http_status=http_status,
+                tool_error_text=failure[2],
             ) from None
         return result

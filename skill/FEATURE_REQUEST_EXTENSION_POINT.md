@@ -14,7 +14,9 @@ plataforma para eso.
 
 Estamos construyendo un skill técnico reutilizable (`supabase-employee-integration`)
 que conecta cualquier empleado a un proyecto de Supabase vía el conector `sgmcp`
-(catálogo id 51). El paquete en sí (`sgmcp_adapter`) ya está terminado, probado
+(MCP genérico, `https://mcp-supabase-generico.onrender.com` - el número de id
+de catálogo no es el mismo en todos los tenants, no es una referencia fiable
+entre ellos). El paquete en sí (`sgmcp_adapter`) ya está terminado, probado
 de forma aislada, y verificado símbolo por símbolo contra la plantilla actual
 de `wai-agent-app-builder` - funciona.
 

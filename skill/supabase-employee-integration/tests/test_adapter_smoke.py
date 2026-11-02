@@ -16,6 +16,7 @@ import pytest
 
 from sgmcp_adapter.config import ConfigError, ConnectionConfig, TableConfig
 from sgmcp_adapter.core import Adapter, AdapterError, ConfigurationError, LoginRequired, Settings
+from sgmcp_adapter.mcp_client import MCPError, _result
 from sgmcp_adapter.tool_catalogue import tool_catalogue
 
 
@@ -90,6 +91,20 @@ class _RealisticSupabaseTransport:
         return {"content": [{"type": "text", "text": json.dumps(body)}]}
 
 
+class _ToolErrorTransport:
+    """Simulates sgmcp returning isError: true for a write call, carrying a
+    given raw tool_error_text - exactly what MCPClient.call() would have
+    extracted before core.Adapter ever sees it (see mcp_client._result)."""
+
+    def __init__(self, tool_error_text):
+        self.tool_error_text = tool_error_text
+        self.calls = []
+
+    async def call(self, tool, arguments):
+        self.calls.append((tool, dict(arguments)))
+        raise MCPError(kind="tool", tool_error_text=self.tool_error_text)
+
+
 def _adapter(config, transport, *, active_token="good-token"):
     settings = Settings(URL, anon_key=ANON_KEY, service_role_key=SERVICE_ROLE_KEY)
 
@@ -97,6 +112,31 @@ def _adapter(config, transport, *, active_token="good-token"):
         return "chat-active" if run_token == active_token else None
 
     return Adapter(config, settings, lambda: None, transport, resolve_actor)
+
+
+def test_result_captures_error_text_from_json_rpc_error_shape():
+    # This is the shape sgmcp's actual direct JSON-RPC POST handler uses for
+    # EVERY thrown error (including an RLS rejection) - the one this client's
+    # real traffic hits, as opposed to the SDK/SSE isError:true shape below.
+    message = {
+        "jsonrpc": "2.0", "id": "req-1",
+        "error": {"code": -32603, "message": 'new row violates row-level security policy for table "notas"'},
+    }
+    with pytest.raises(MCPError) as raised:
+        _result(message, "req-1")
+    assert raised.value.kind == "remote"
+    assert raised.value.tool_error_text == 'new row violates row-level security policy for table "notas"'
+
+
+def test_result_captures_error_text_from_tool_content_shape():
+    message = {
+        "jsonrpc": "2.0", "id": "req-1",
+        "result": {"content": [{"type": "text", "text": "Error: boom"}], "isError": True},
+    }
+    with pytest.raises(MCPError) as raised:
+        _result(message, "req-1")
+    assert raised.value.kind == "tool"
+    assert raised.value.tool_error_text == "Error: boom"
 
 
 def test_table_config_rejects_unknown_writable_column():
@@ -116,17 +156,23 @@ def test_settings_rejects_anon_key_in_service_role_slot():
 
 def test_tool_catalogue_reflects_config(orders_config):
     names = {tool["name"] for tool in tool_catalogue(orders_config)}
-    assert names == {"leer_registros", "insertar_registros", "actualizar_registros", "eliminar_registros"}
+    assert names == {
+        "leer_registros", "insertar_registros", "actualizar_registros", "eliminar_registros",
+        "upsertar_registros",
+    }
 
 
 def test_tool_catalogue_is_registered_before_any_table_is_configured():
-    # All four tools must exist in the catalogue from the very first deploy,
+    # All five tools must exist in the catalogue from the very first deploy,
     # before any admin has configured a table - the agent runtime discovers
     # this catalogue once, at startup, and never revisits it. core.Adapter
     # is what rejects an unconfigured/unknown table, not an absent tool.
     empty_config = ConnectionConfig(auth_mode="rls_personal", tables={})
     names = {tool["name"] for tool in tool_catalogue(empty_config)}
-    assert names == {"leer_registros", "insertar_registros", "actualizar_registros", "eliminar_registros"}
+    assert names == {
+        "leer_registros", "insertar_registros", "actualizar_registros", "eliminar_registros",
+        "upsertar_registros",
+    }
     leer = next(tool for tool in tool_catalogue(empty_config) if tool["name"] == "leer_registros")
     assert "enum" not in leer["inputSchema"]["properties"]["tabla"]
 
@@ -167,6 +213,88 @@ async def test_write_requires_preflight_and_validates_columns(orders_config):
         await adapter.execute(
             "good-token", "insertar_registros", {"tabla": "orders", "datos": {"status": "nope", "amount": 10}}, write_context=context,
         )
+
+
+@pytest.mark.asyncio
+async def test_upsert_requires_preflight_and_validates_columns(orders_config):
+    transport = _FakeTransport()
+    adapter = _adapter(orders_config, transport)
+
+    with pytest.raises(LoginRequired):
+        await adapter.execute("good-token", "upsertar_registros", {"tabla": "orders", "datos": {"status": "active", "amount": 10}})
+
+    context = await adapter.preflight_write("good-token", "upsertar_registros", {"tabla": "orders", "datos": {"status": "active", "amount": 10}})
+    await adapter.validate_write_context("good-token", context)
+    result = await adapter.execute(
+        "good-token", "upsertar_registros", {"tabla": "orders", "datos": {"status": "active", "amount": 10}}, write_context=context,
+    )
+    assert result["resultado"] == [{"id": "2", "status": "active", "amount": 10}]
+    assert transport.calls[-1][0] == "supabase_upsertar"
+
+    with pytest.raises(AdapterError):
+        await adapter.execute(
+            "good-token", "upsertar_registros", {"tabla": "orders", "datos": {"status": "nope", "amount": 10}}, write_context=context,
+        )
+
+
+@pytest.mark.asyncio
+async def test_write_rejected_by_rls_reports_clear_not_sent_message(orders_config):
+    transport = _ToolErrorTransport('Error: new row violates row-level security policy for table "orders"')
+    adapter = _adapter(orders_config, transport)
+    context = await adapter.preflight_write(
+        "good-token", "insertar_registros", {"tabla": "orders", "datos": {"status": "active", "amount": 10}},
+    )
+    await adapter.validate_write_context("good-token", context)
+    with pytest.raises(AdapterError) as raised:
+        await adapter.execute(
+            "good-token", "insertar_registros", {"tabla": "orders", "datos": {"status": "active", "amount": 10}}, write_context=context,
+        )
+    error = raised.value
+    assert error.write_state == "not_sent"
+    assert error.code == "supabase_write_rejected_rls"
+    assert "politicas de seguridad" in str(error).lower()
+    assert "administrador" in str(error).lower()
+
+
+@pytest.mark.asyncio
+async def test_write_failure_without_rls_signature_stays_ambiguous(orders_config):
+    # Regression guard: any write failure that is NOT the exact, stable RLS
+    # rejection text must keep the old, cautious write_state="unknown"
+    # treatment - this must never change for a genuinely ambiguous failure.
+    transport = _ToolErrorTransport("Error: connection terminated unexpectedly")
+    adapter = _adapter(orders_config, transport)
+    context = await adapter.preflight_write(
+        "good-token", "insertar_registros", {"tabla": "orders", "datos": {"status": "active", "amount": 10}},
+    )
+    await adapter.validate_write_context("good-token", context)
+    with pytest.raises(AdapterError) as raised:
+        await adapter.execute(
+            "good-token", "insertar_registros", {"tabla": "orders", "datos": {"status": "active", "amount": 10}}, write_context=context,
+        )
+    error = raised.value
+    assert error.write_state == "unknown"
+    assert error.code == "supabase_operation_failed"
+    # Admin-only diagnostic (same exposure mechanism as read failures' response_shape,
+    # see tools.py) - lets an admin see the raw text without us guessing next time.
+    assert error.response_shape["schema"] == "sgmcp_write_error_v1"
+    assert error.response_shape["tool_error_text"] == "Error: connection terminated unexpectedly"
+
+
+@pytest.mark.asyncio
+async def test_write_rejected_by_rls_does_not_need_admin_diagnostic(orders_config):
+    # The RLS-specific branch already gives a clear message - it returns before
+    # reaching the generic fallback, so it should NOT carry response_shape.
+    transport = _ToolErrorTransport('Error: new row violates row-level security policy for table "orders"')
+    adapter = _adapter(orders_config, transport)
+    context = await adapter.preflight_write(
+        "good-token", "insertar_registros", {"tabla": "orders", "datos": {"status": "active", "amount": 10}},
+    )
+    await adapter.validate_write_context("good-token", context)
+    with pytest.raises(AdapterError) as raised:
+        await adapter.execute(
+            "good-token", "insertar_registros", {"tabla": "orders", "datos": {"status": "active", "amount": 10}}, write_context=context,
+        )
+    assert getattr(raised.value, "response_shape", None) is None
 
 
 @pytest.mark.asyncio
