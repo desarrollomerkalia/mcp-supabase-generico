@@ -14,6 +14,7 @@ import json
 
 import pytest
 
+from sgmcp_adapter import channel_binding
 from sgmcp_adapter.config import ConfigError, ConnectionConfig, TableConfig
 from sgmcp_adapter.core import Adapter, AdapterError, ConfigurationError, LoginRequired, Settings
 from sgmcp_adapter.mcp_client import MCPError, _result
@@ -367,3 +368,15 @@ async def test_service_role_read_against_realistic_total_registros_shape(orders_
     assert result["registros"] == [{"id": "1", "status": "active", "amount": 10}]
     assert result["total_visible"] == 1
     assert result["completa"] is True
+
+
+def test_channel_binding_canon_phone_strips_non_digits():
+    assert channel_binding._canon_phone("+52 55 1234-5678") == "525512345678"
+    assert channel_binding._canon_phone("whatsapp:+525512345678") == "525512345678"
+    assert channel_binding._canon_phone("") == ""
+
+
+def test_channel_binding_key_is_stable_across_equivalent_formats():
+    a = channel_binding._binding_key(7, "+52 55 1234 5678")
+    b = channel_binding._binding_key(7, "whatsapp:5255-1234-5678")
+    assert a == b == "7:525512345678"

@@ -15,6 +15,7 @@ from fastapi import HTTPException
 
 from .config import DENIABLE_TOOLS as _WRITE_TOOLS
 from .core import Adapter, AdapterError, LoginRequired
+from .public_url import public_url_metadata
 from .tool_catalogue import tool_catalogue
 
 
@@ -60,9 +61,14 @@ def register_tools(adapter: Adapter, *, configuration_loader=None, diagnostic_au
     ``response_shape`` a read failure may carry (see response_shape.py) -
     the same thing routes.py already exposes for the HTTP admin endpoints.
     Without it, a bad response from sgmcp is a dead end that only shows up
-    by digging through tool_use_log by hand."""
+    by digging through tool_use_log by hand.
+
+    Registers at LEVEL_AGENT, not LEVEL_HUMAN - see the comment at the
+    TOOL_MIN_ROLE assignment below for why. identity/authorization for
+    every call is enforced inside generic_operation() itself, not by the
+    host's own role gate."""
     from app import mcp_server
-    from app.mcp_actor import LEVEL_HUMAN, TOOL_MIN_ROLE
+    from app.mcp_actor import LEVEL_AGENT, TOOL_MIN_ROLE
 
     async def generic_operation(call):
         from sqlalchemy import select
@@ -71,18 +77,69 @@ def register_tools(adapter: Adapter, *, configuration_loader=None, diagnostic_au
         from app.app_models.runtime import AgentRun
 
         async with app_session() as session:
-            token = (await session.execute(select(AgentRun.run_token).where(
+            row = (await session.execute(select(
+                AgentRun.run_token, AgentRun.mode, AgentRun.origen,
+                AgentRun.canal_id, AgentRun.solicitante,
+            ).where(
                 AgentRun.id == call.run_id,
-                AgentRun.mode == "chat",
                 AgentRun.status == "RUNNING",
                 AgentRun.finished_at.is_(None),
-            ))).scalar_one_or_none()
-        if not token:
+            ))).one_or_none()
+        if row is None:
             raise HTTPException(401, "Se requiere un turno de chat activo.")
+        token, mode, origen, canal_id, solicitante = row
+        if mode != "chat":
+            # A live channel conversation (e.g. WhatsApp) - not a scheduled/
+            # autonomous job, which has no human on the other end to verify
+            # anything for - can use these tools only with a verified
+            # channel_binding, never through the channel's own unverified
+            # contact-directory guess at an email.
+            if origen != "canal" or canal_id is None or not solicitante:
+                raise HTTPException(401, "Se requiere un turno de chat activo.")
+            from .channel_binding import resolve_channel_principal, sign_verification_token
+
+            if await resolve_channel_principal(canal_id, solicitante) is None:
+                if configuration_loader:
+                    await configuration_loader()
+                base_url = public_url_metadata(adapter.public_base_url)["effective_public_base_url"]
+                if base_url is None:
+                    raise HTTPException(503, {
+                        "code": "supabase_public_base_url_required",
+                        "message": "Un administrador debe configurar la URL publica HTTPS del empleado para verificar este canal.",
+                    })
+                link_token = sign_verification_token(canal_id, solicitante)
+                link = base_url + "/supabase-canal-verificar?token=" + link_token
+                raise HTTPException(401, {
+                    "code": "supabase_channel_not_verified",
+                    "message": (
+                        "*Vincula tu cuenta para continuar*\n\n"
+                        "Para atender tu consulta, necesitas vincular este WhatsApp con tu cuenta de Supabase.\n\n"
+                        "*Abre este enlace:*\n"
+                        + link + "\n\n"
+                        "Si aparece el acceso a WAI, inicia sesión. Después introduce tu contraseña de Supabase "
+                        "y pulsa «Verificar y vincular».\n\n"
+                        "*El enlace vence en 30 minutos.*\n"
+                        "No compartas tu contraseña por WhatsApp.\n\n"
+                        "Cuando termines, vuelve aquí y repite tu consulta."
+                    ),
+                })
         try:
             if configuration_loader:
                 await configuration_loader()
+            personal_channel = (
+                mode != "chat"
+                and adapter.config.auth_mode == "rls_personal"
+            )
+            if personal_channel:
+                if call.name in _WRITE_TOOLS:
+                    raise HTTPException(403, "Las escrituras CRM requieren el chat WAI autenticado.")
+                if not token:
+                    token = f"canal:{canal_id}:{solicitante}"
             if call.name not in _WRITE_TOOLS:
+                if personal_channel:
+                    from .wai_identity import channel_run_context
+                    with channel_run_context(call.run_id):
+                        return await adapter.execute(token, call.name, call.arguments)
                 return await adapter.execute(token, call.name, call.arguments)
 
             context = await adapter.preflight_write(token, call.name, call.arguments)
@@ -163,4 +220,16 @@ def register_tools(adapter: Adapter, *, configuration_loader=None, diagnostic_au
         described_operation.__doc__ = descriptor["description"]
         mcp_server.TOOLS[name] = described_operation
         mcp_server.MCP_TOOL_SCHEMAS[name] = descriptor["inputSchema"]
-        TOOL_MIN_ROLE[name] = LEVEL_HUMAN
+        # LEVEL_AGENT, not LEVEL_HUMAN: the host's own gate_error() only ever
+        # treats mode=="chat" as human (Actor.is_human), with no hook a
+        # registered tool can use to say "this non-chat actor has a verified
+        # identity too" - its one escape hatch (ADMIN_READ_TOOLS) is a closed
+        # list of 8 host tool names requiring directory-admin role, unrelated
+        # to channel_binding. generic_operation()'s own gate below is what
+        # actually enforces identity now (chat, or a canal run with a
+        # verified binding - anything else, including a scheduled/autonomous
+        # run or an unbound canal run, is rejected there) - this trades the
+        # host's independent check for our own, already covered by tests
+        # that confirm a scheduled run is rejected even with a valid binding
+        # for the same channel identity.
+        TOOL_MIN_ROLE[name] = LEVEL_AGENT

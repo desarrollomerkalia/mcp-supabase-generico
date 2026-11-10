@@ -63,6 +63,63 @@ inmediato):
    (`{error: {code, message}}`), un formato completamente distinto. El texto
    de Postgres viajaba hasta nosotros todo este tiempo; simplemente nunca se
    leía de esa rama. `mcp_client.py` ahora captura el texto en ambos formatos.
+6. **Vinculación de canal (WhatsApp u otro) a una sesión personal de
+   Supabase** (nuevo en esta versión, probado de punta a punta con WhatsApp
+   real): hasta ahora `rls_personal` solo funcionaba desde el chat web -
+   una conversación de canal (WhatsApp) nunca tenía forma de usar las
+   herramientas con una identidad verificada, y el directorio teléfono→email
+   del host es deliberadamente NO confiable para esto (ver
+   `wai_identity.py`). `channel_binding.py` + `routes.py` (`POST
+   /channel-session`, `GET`/`DELETE /channel-bindings/...`) agregan un
+   enlace de verificación firmado y cifrado (`sign_verification_token` /
+   `verify_token`, mismo mecanismo de cifrado que ya protegía la
+   configuración) que ata un `(canal_id, teléfono)` a un email ya
+   autenticado por una contraseña real de Supabase - nunca por el token en
+   sí. Escrituras siguen exigiendo el chat web (decisión de alcance, no
+   limitación técnica). Varios hallazgos reales costosos en el camino:
+   - **El propio rol mínimo del host (`TOOL_MIN_ROLE`) bloqueaba todo antes
+     de llegar al adaptador:** `app/mcp_actor.py` solo trata `mode=="chat"`
+     como humano; no hay forma de decirle "este actor de canal ya tiene
+     identidad verificada". Las cinco tools se registran en `LEVEL_AGENT`,
+     no `LEVEL_HUMAN` - la identidad/autorización real vive enteramente
+     dentro de `generic_operation()`, no en el gate del host.
+   - **El esquema de las tools solo aceptaba `run_token`, pero una
+     conversación de canal solo recibe `run_id` (entero) del runtime,
+     nunca un `run_token`:** sin `run_id` como alternativa declarada en el
+     `inputSchema` (`anyOf: [{required: [run_token]}, {required:
+     [run_id]}]`), el modelo no tenía ningún argumento válido que pasar y
+     simplemente dejaba de intentar la llamada - sin error visible en
+     ningún log, porque nunca llegaba a construirse la llamada.
+   - **El `run_token` real de una fila de canal puede ser `NULL`** (el
+     INSERT de ejecuciones de canal no lo asigna, a diferencia del chat).
+     `generic_operation()` arma en su lugar un identificador sintético
+     (`"canal:{canal_id}:{solicitante}"`) atado al `run_id` exacto de esa
+     invocación vía un `ContextVar` (`wai_identity.channel_run_context`) -
+     nunca persistido, nunca reutilizable entre turnos distintos.
+   - **La memoria propia del empleado (`self_memory`) y la memoria del
+     usuario pueden sesgar al modelo a no intentar la llamada en absoluto**,
+     incluso con el backend ya corregido: observaciones repetidas de
+     fallos anteriores (reales o de pruebas) se convierten en una "línea
+     base" que el modelo trata como verdad sin volver a probar. No hay
+     arreglo de código para esto - es un comportamiento del modelo, no un
+     bug del adaptador - pero vale la pena saberlo antes de pasar horas
+     depurando algo que ya funciona: limpiar ambas memorias y pedirle al
+     empleado que explique por qué no intentó la llamada (en vez de pedirle
+     de nuevo el dato de negocio) ayuda a diagnosticarlo rápido.
+   - **El modelo a veces resumía el link de verificación en vez de copiarlo
+     literal** en su respuesta de WhatsApp, incluso cuando el backend sí lo
+     generaba correctamente - inutilizando el link para quien lo recibía.
+     La instrucción del skill operativo debe exigir copiar el campo
+     `message` completo, carácter por carácter, cuando llega
+     `code: "supabase_channel_not_verified"` - ver
+     `procedures/channel_verification_ux.md`.
+   - **El link necesita una URL pública absoluta para ser tocable en
+     WhatsApp** - sin `APP_PUBLIC_BASE_URL` (inyectada por el desplegador)
+     ni una configuración explícita, sale una ruta relativa que WhatsApp no
+     convierte en enlace. `public_url.py` agrega una URL pública
+     configurable por empleado (override admin → `APP_PUBLIC_BASE_URL` →
+     sin URL disponible), persistida igual que el resto de la
+     configuración cifrada, sin inventar ni hardcodear ningún dominio.
 
 ## Cuándo se aplica
 - El encargo del empleado menciona Supabase, una base de datos Postgres gestionada por Supabase, o el conector `sgmcp`.
@@ -80,13 +137,14 @@ inmediato):
 
 ## Contenido de este skill
 - `VERSION`: una sola línea con el número de esta versión. Es la única fuente de verdad para saber qué número publicar al replicar este skill en otro tenant (ver `../../docs/REPLICAR_SKILL_EN_OTRO_TENANT.md`) - no la repitas de memoria en un prompt, léela de aquí.
-- `assets/sgmcp_adapter/` + `assets/pyproject.toml`: el paquete Python del backend, autocontenido - no depende de ningún otro repositorio ni de que exista una sesión previa.
-- `assets/frontend/`: componentes React/TS de la integración estándar (servicio, hook, banner, formulario de configuración, formulario de login, fragmentos de traducción es/en) - genéricos, verificados contra una implementación real (reusados o extendidos, según el archivo - cada uno documenta cuál). El formulario de login solo se monta cuando el modo de acceso es `rls_personal`.
+- `assets/sgmcp_adapter/` + `assets/pyproject.toml`: el paquete Python del backend, autocontenido - no depende de ningún otro repositorio ni de que exista una sesión previa. Incluye `channel_binding.py` (vínculos de canal verificados) y `public_url.py` (resolución de la URL pública del empleado) - ver punto 6 de la sección de verificación arriba.
+- `assets/frontend/`: componentes React/TS de la integración estándar (servicio, hook, banner, formulario de configuración, formulario de login, formulario de verificación de canal `SupabaseChannelVerifyForm.tsx`, el mecanismo de retorno tras login WAI `supabaseReturn.ts`, fragmentos de traducción es/en) - genéricos, verificados contra una implementación real (reusados o extendidos, según el archivo - cada uno documenta cuál). El formulario de login y el de verificación de canal solo se montan cuando el modo de acceso es `rls_personal`.
 - `procedures/integrate.md`: pasos exactos para integrar el backend, incluida la declaración de la única modificación a un archivo invariante de la plantilla (`backend/app/main.py`).
 - `procedures/integrate_frontend.md`: pasos exactos para integrar las pantallas, incluida la declaración de la divergencia en `frontend/src/pages/Operations.tsx`.
+- `procedures/channel_verification_ux.md`: contrato de la vinculación de canal para empleados que YA la implementan - origen del enlace, mensaje canónico, y la regla de copia literal que debe llevar el skill operativo del propio empleado (no este skill de construcción).
 - `checks/check_host_contract.py`: script ejecutable que verifica por introspección, sin conectar a ninguna base de datos, que el backend expone los símbolos y firmas que `sgmcp_adapter` necesita.
-- `checks/test_adapter_integration.py`: pruebas opcionales que **sí** necesitan RDWAI real (SQLite temporal del `conftest.py` de la plantilla, modelos SQLAlchemy reales) - cubren la persistencia real en base de datos y que `response_shape` solo se expone a administradores, con los 4 casos de autorización incluido el fallo cerrado. Cópialo a `src/backend/tests/` del empleado y corre `pytest` ahí; no es parte de la suite independiente de abajo.
-- `tests/test_adapter_smoke.py`: pruebas del paquete de backend en aislamiento (config, catálogo de tools, lectura/escritura simuladas) - no requieren un backend real. No hay pruebas automatizadas del frontend en esta versión.
+- `checks/test_adapter_integration.py` + `checks/test_sgmcp_channels.py` + `checks/conftest.py`: pruebas opcionales que **sí** necesitan RDWAI real (SQLite temporal, modelos SQLAlchemy reales) - cubren persistencia real en base de datos, autorización de `response_shape`, y todo el flujo de vinculación de canal (gate del host en `LEVEL_AGENT`, identificador sintético por `ContextVar`, rechazo de ejecuciones programadas incluso con un vínculo válido). Cópialos a `src/backend/tests/` del empleado y corre `pytest` ahí; no son parte de la suite independiente de abajo.
+- `tests/test_adapter_smoke.py` + `tests/test_sgmcp_schemas.py` + `tests/test_public_url.py`: pruebas del paquete de backend en aislamiento (config, catálogo de tools, esquema `run_token`/`run_id`, validación pura de URLs públicas, lectura/escritura simuladas) - no requieren un backend real. No hay pruebas automatizadas del frontend en esta versión.
 
 ## Regla dura
 Si `checks/check_host_contract.py` reporta algún fallo, o si integrar requiere modificar algo fuera de lo que describe `procedures/integrate.md`, **detente y repórtalo** en vez de parchear `assets/sgmcp_adapter/` para adaptarte al caso particular, o de modificar `app/main.py` sin seguir el protocolo de divergencias. Los ajustes al paquete se hacen una vez, centralmente, publicando una nueva versión de este skill - no por empleado.

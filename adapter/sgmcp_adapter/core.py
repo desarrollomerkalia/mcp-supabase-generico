@@ -314,6 +314,7 @@ class Adapter:
         self._session_states: "dict[str, tuple[str, str | None]]" = {}
         self._locks: "dict[str, asyncio.Lock]" = {}
         self._configuration_generation = 0
+        self.public_base_url = None
 
     @property
     def settings(self) -> Settings:

@@ -22,6 +22,7 @@ import httpx
 from .config import ConfigError, ConnectionConfig
 from .core import SUPABASE_AUTH_PATH, Adapter, ConfigurationError, Settings
 from .mcp_client import MCPClient
+from .public_url import normalize_public_base_url
 from .routes import connection_router
 from .tools import register_tools
 from .wai_identity import active_chat_email
@@ -136,9 +137,13 @@ def mount(
                 "No se pudo guardar la configuracion protegida; revisa la clave de cifrado del empleado.",
             ) from None
 
-    def apply(config: ConnectionConfig, settings: Settings) -> bool:
-        changed = adapter.configure(config, settings)
-        register_tools(adapter, configuration_loader=load_configuration, diagnostic_authorizer=may_diagnose)
+    def apply(config: ConnectionConfig, settings: Settings, public_base_url) -> bool:
+        access_changed = config != adapter.config or settings != adapter._settings
+        changed = access_changed or public_base_url != adapter.public_base_url
+        if access_changed:
+            adapter.configure(config, settings)
+            register_tools(adapter, configuration_loader=load_configuration, diagnostic_authorizer=may_diagnose)
+        adapter.public_base_url = public_base_url
         return changed
 
     async def load_configuration() -> None:
@@ -172,7 +177,11 @@ def mount(
                 })
                 settings = Settings(payload.get("project_url"), payload.get("anon_key"), payload.get("service_role_key"))
                 settings.for_mode(config.auth_mode)
-                apply(config, settings)
+                try:
+                    public_base_url = normalize_public_base_url(payload.get("public_base_url"))
+                except ValueError:
+                    public_base_url = None
+                apply(config, settings, public_base_url)
                 loaded = True
             except ConfigurationError as failure:
                 adapter._configuration_error = failure
@@ -188,7 +197,7 @@ def mount(
                 )
                 loaded = True
 
-    async def save_configuration(body, actor_email: str) -> bool:
+    async def save_configuration(body, actor_email: str) -> dict:
         from app.channels.encryption import encryption_available
 
         async with configuration_lock:
@@ -210,14 +219,25 @@ def mount(
                 body.service_role_key.get_secret_value() if body.service_role_key is not None else (current.service_role_key if current else None),
             )
             settings.for_mode(config.auth_mode)
-            await validate_pair(settings, config.auth_mode)
+            try:
+                public_base_url = (adapter.public_base_url if body.public_base_url is None
+                                   else normalize_public_base_url(body.public_base_url))
+            except ValueError:
+                raise ConfigurationError(
+                    "supabase_public_base_url_invalid", "Configura un origen HTTPS publico valido, sin ruta ni credenciales.",
+                ) from None
+            access_changed = settings != current or config != adapter.config
+            if access_changed:
+                await validate_pair(settings, config.auth_mode)
             payload = {
                 "project_url": settings.supabase_url, "auth_mode": config.auth_mode,
                 "anon_key": settings.anon_key, "service_role_key": settings.service_role_key,
                 "tables": config.to_dict()["tables"], "denied": sorted(config.denied), "read_limit": config.read_limit,
+                "public_base_url": public_base_url,
             }
             await persist(payload, actor_email)
-            return apply(config, settings)
+            changed = apply(config, settings, public_base_url)
+            return {"changed": changed, "access_changed": access_changed}
 
     async def may_configure(email: str) -> bool:
         from app.channels.encryption import encryption_available

@@ -113,6 +113,61 @@ incompleta a una pregunta razonable sobre el propio empleado.
 3. Agrega una entrada para `/supabase-login` siguiendo la forma de las
    entradas existentes. No cambies nada más del archivo.
 
+## 4c. Montar la verificación de canal (WhatsApp) - mismo condicional que el login (sin divergencia)
+
+Igual que el login personal, esto solo aplica cuando el modo de acceso
+configurado es `rls_personal` - sin sesión por usuario no hay nada que
+vincular a un canal. Permite que una conversación de WhatsApp (u otro
+canal) use las herramientas con la identidad verificada de quien escribe,
+en vez de quedar limitado al chat web - ver el punto 6 de la sección de
+verificación al inicio de este skill para el porqué completo.
+
+1. Copia `assets/frontend/components/SupabaseChannelVerifyForm.tsx` y
+   `assets/frontend/services/supabaseReturn.ts` tal cual, sin modificar su
+   contenido, a `src/frontend/src/components/` y
+   `src/frontend/src/services/` respectivamente.
+2. En el paso 2 (fusión de traducciones), el bloque `supabaseChannelVerify`
+   y los códigos de error `supabase_channel_not_verified`/
+   `supabase_channel_token_invalid`/`supabase_public_base_url_invalid`/
+   `supabase_public_base_url_required` ya vienen incluidos en los
+   fragmentos `assets/frontend/i18n/es.ts`/`en.ts` de este skill - no hace
+   falta un paso de fusión aparte, solo no perderlos al copiar solo un
+   subconjunto de claves.
+3. **Monta la ruta `/supabase-canal-verificar` FUERA del `<Layout>`**, en la
+   misma rama sin sesión/pública de `App.tsx` donde vive `/login` - nunca
+   dentro del árbol que usa `<Layout>`. Motivo verificado contra un
+   empleado real: `Layout.tsx` (invariante) redirige en móvil cualquier
+   ruta que no sea `/agent`, lo que rompe tanto esta pantalla como
+   `/supabase-login` si quedan dentro de ese árbol. Usa
+   `SupabaseChannelVerifyForm` protegido por el mismo mecanismo de sesión
+   WAI que ya usa `/supabase-login` (sigue exigiendo sesión WAI - la
+   identidad de quien vincula el canal nunca se relaja a "token únicamente",
+   ver `procedures/channel_verification_ux.md` para el porqué de seguridad).
+4. Conecta `supabaseReturn.ts` al flujo de login de WAI para que el
+   `?token=...` de la URL original sobreviva el ir-y-volver de
+   `/login`: antes de redirigir a login sin sesión, guarda el destino con
+   `rememberSupabaseReturn(supabaseDestination(pathname, search), true)`;
+   al volver ya autenticado a la raíz, si `getSupabaseReturn()` devuelve un
+   destino pendiente, navega ahí y limpia con `clearSupabaseReturn()`. No
+   dupliques esta lógica a mano - son las únicas tres funciones exportadas
+   del archivo, ya probadas.
+5. Agrega la ruta en `App.tsx`:
+   ```tsx
+   <Route path="/supabase-canal-verificar" element={<SupabaseChannelVerifyForm />} />
+   ```
+   en la misma rama donde montaste `/supabase-login`.
+6. En el paso 4b (`self_knowledge.py`), agrega también una entrada para
+   `/supabase-canal-verificar` junto a la de `/supabase-login` - mismo
+   protocolo de divergencia, no una entrada por separado.
+7. Un administrador debe configurar la URL pública del empleado (campo
+   nuevo en `SupabaseConfigurationForm`, Operaciones → Conectores →
+   Supabase) para que el enlace que se envía por el canal sea una URL
+   absoluta y tocable - sin eso, el backend devuelve
+   `supabase_public_base_url_required` en vez de un enlace roto. Esto no
+   es parte de este procedimiento de frontend (es configuración de
+   negocio, como la URL del proyecto Supabase), pero repórtalo como
+   pendiente de configurar si el empleado va a usar canales.
+
 ## 5. Verificar
 
 - El frontend compila sin errores.

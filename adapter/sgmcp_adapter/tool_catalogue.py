@@ -63,9 +63,14 @@ def tool_catalogue(config: ConnectionConfig) -> list:
         ),
         "inputSchema": {
             "type": "object", "additionalProperties": False,
-            "required": ["run_token", "tabla"],
+            "required": ["tabla"],
+            "anyOf": [
+                {"required": ["run_token"]},
+                {"required": ["run_id"]},
+            ],
             "properties": {
-                "run_token": {"type": "string", "description": "Identificador del turno de chat actual, nunca un token de Supabase."},
+                "run_token": {"type": "string", "description": "Token exacto de la linea [INTERNO] del turno actual de chat web. Usalo si el sistema lo proporciona; nunca lo inventes ni uses un token de Supabase."},
+                "run_id": {"type": "integer", "minimum": 1, "description": "Entero de ejecucion que el sistema proporciona en conversaciones de canal (WhatsApp, etc.) cuando no hay run_token. No sustituye al run_token en el chat web."},
                 "tabla": _table_property(table_names),
                 "filtros": {"type": "object", "description": "Pares columna-valor; solo columnas filtrables de la tabla."},
                 "limite": {"type": "integer", "minimum": 1, "maximum": config.read_limit},
@@ -86,9 +91,14 @@ def tool_catalogue(config: ConnectionConfig) -> list:
             ),
             "inputSchema": {
                 "type": "object", "additionalProperties": False,
-                "required": ["run_token", "tabla", "datos"],
+                "required": ["tabla", "datos"],
+                "anyOf": [
+                    {"required": ["run_token"]},
+                    {"required": ["run_id"]},
+                ],
                 "properties": {
-                    "run_token": {"type": "string"},
+                    "run_token": {"type": "string", "description": "Token exacto de la linea [INTERNO] del turno actual de chat web. Usalo si el sistema lo proporciona; nunca lo inventes ni uses un token de Supabase."},
+                    "run_id": {"type": "integer", "minimum": 1, "description": "Entero de ejecucion que el sistema proporciona en conversaciones de canal (WhatsApp, etc.) cuando no hay run_token. No sustituye al run_token en el chat web."},
                     "tabla": _table_property(writable_tables),
                     "datos": {"type": "object"},
                 },
@@ -106,9 +116,14 @@ def tool_catalogue(config: ConnectionConfig) -> list:
             ),
             "inputSchema": {
                 "type": "object", "additionalProperties": False,
-                "required": ["run_token", "tabla", "datos"],
+                "required": ["tabla", "datos"],
+                "anyOf": [
+                    {"required": ["run_token"]},
+                    {"required": ["run_id"]},
+                ],
                 "properties": {
-                    "run_token": {"type": "string"},
+                    "run_token": {"type": "string", "description": "Token exacto de la linea [INTERNO] del turno actual de chat web. Usalo si el sistema lo proporciona; nunca lo inventes ni uses un token de Supabase."},
+                    "run_id": {"type": "integer", "minimum": 1, "description": "Entero de ejecucion que el sistema proporciona en conversaciones de canal (WhatsApp, etc.) cuando no hay run_token. No sustituye al run_token en el chat web."},
                     "tabla": _table_property(writable_tables),
                     "datos": {"type": "object"},
                 },
@@ -125,9 +140,14 @@ def tool_catalogue(config: ConnectionConfig) -> list:
             ),
             "inputSchema": {
                 "type": "object", "additionalProperties": False,
-                "required": ["run_token", "tabla", "columna_filtro", "valor_filtro", "datos"],
+                "required": ["tabla", "columna_filtro", "valor_filtro", "datos"],
+                "anyOf": [
+                    {"required": ["run_token"]},
+                    {"required": ["run_id"]},
+                ],
                 "properties": {
-                    "run_token": {"type": "string"},
+                    "run_token": {"type": "string", "description": "Token exacto de la linea [INTERNO] del turno actual de chat web. Usalo si el sistema lo proporciona; nunca lo inventes ni uses un token de Supabase."},
+                    "run_id": {"type": "integer", "minimum": 1, "description": "Entero de ejecucion que el sistema proporciona en conversaciones de canal (WhatsApp, etc.) cuando no hay run_token. No sustituye al run_token en el chat web."},
                     "tabla": _table_property(writable_tables),
                     "columna_filtro": {"type": "string"},
                     "valor_filtro": {"type": "string"},
@@ -143,9 +163,14 @@ def tool_catalogue(config: ConnectionConfig) -> list:
             "description": "Elimina registros de una tabla permitida, filtrando por una columna.",
             "inputSchema": {
                 "type": "object", "additionalProperties": False,
-                "required": ["run_token", "tabla", "columna_filtro", "valor_filtro"],
+                "required": ["tabla", "columna_filtro", "valor_filtro"],
+                "anyOf": [
+                    {"required": ["run_token"]},
+                    {"required": ["run_id"]},
+                ],
                 "properties": {
-                    "run_token": {"type": "string"},
+                    "run_token": {"type": "string", "description": "Token exacto de la linea [INTERNO] del turno actual de chat web. Usalo si el sistema lo proporciona; nunca lo inventes ni uses un token de Supabase."},
+                    "run_id": {"type": "integer", "minimum": 1, "description": "Entero de ejecucion que el sistema proporciona en conversaciones de canal (WhatsApp, etc.) cuando no hay run_token. No sustituye al run_token en el chat web."},
                     "tabla": _table_property(table_names),
                     "columna_filtro": {"type": "string"},
                     "valor_filtro": {"type": "string"},

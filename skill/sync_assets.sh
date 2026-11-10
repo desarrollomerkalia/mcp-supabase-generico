@@ -17,5 +17,7 @@ rm -rf supabase-employee-integration/assets/frontend
 cp -R ../adapter/frontend supabase-employee-integration/assets/frontend
 
 cp ../adapter/integration_tests/test_adapter_integration.py supabase-employee-integration/checks/test_adapter_integration.py
+cp ../adapter/integration_tests/test_sgmcp_channels.py supabase-employee-integration/checks/test_sgmcp_channels.py
+cp ../adapter/integration_tests/conftest.py supabase-employee-integration/checks/conftest.py
 
 echo "Synced adapter/ -> skill/supabase-employee-integration/{assets,tests,checks}"

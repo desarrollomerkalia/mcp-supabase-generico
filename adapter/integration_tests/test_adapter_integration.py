@@ -20,7 +20,7 @@ no son conversaciones reales ni pruebas E2E de chat o autenticacion WAI.
 
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -96,12 +96,15 @@ async def test_configuration_put_commits_encrypted_setting_and_new_mount_reloads
         "project_url": URL, "auth_mode": "service_role",
         "service_role_key": TEST_KEY, "tables": TABLES,
         "denied": ["eliminar_registros"], "read_limit": 17,
+        "public_base_url": "https://employee.example.invalid",
     }
     expected_config = ConnectionConfig.from_dict(payload)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.put("/api/supabase/configuration", json=payload)
     assert response.status_code == 200, response.text
     assert response.json()["configured"] is True
+    assert response.json()["changed"] is True
+    assert response.json()["access_changed"] is True
     assert len(validation_requests) == 1
     assert TEST_KEY not in response.text
 
@@ -112,6 +115,7 @@ async def test_configuration_put_commits_encrypted_setting_and_new_mount_reloads
         assert row.updated_by == ADMIN
         assert TEST_KEY not in row.value
         assert URL not in row.value
+        assert payload["public_base_url"] not in row.value
         assert encryption.decrypt_blob(row.value) == {
             **payload, **expected_config.to_dict(), "anon_key": None,
         }
@@ -128,6 +132,9 @@ async def test_configuration_put_commits_encrypted_setting_and_new_mount_reloads
     assert restarted.settings == adapter.settings
     assert restarted.config == adapter.config
     assert restarted.config == expected_config
+    assert response.json()["public_base_url"] == payload["public_base_url"]
+    assert response.json()["effective_public_base_url"] == payload["public_base_url"]
+    assert response.json()["public_base_url_source"] == "configuration"
     assert len(validation_requests) == 1
     assert TEST_KEY not in response.text
 
@@ -184,3 +191,160 @@ async def test_unit_read_response_shape_is_admin_only_and_fails_closed(role):
     assert "PRUEBA-valor-privado" not in json.dumps(detail)
     assert "PRUEBA-fallo-privado" not in json.dumps(detail)
     assert TEST_KEY not in json.dumps(detail)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["rls_personal", "service_role"])
+async def test_public_url_updates_preserve_sessions_until_access_changes(monkeypatch, mode):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sgmcp_adapter.core import WriteContext
+    from app import users_directory
+
+    async def admin_user():
+        return SimpleNamespace(email=ADMIN)
+
+    monkeypatch.setattr(users_directory, "is_admin", AsyncMock(return_value=True))
+    monkeypatch.setenv("APP_PUBLIC_BASE_URL", "https://env.example.invalid/")
+    app = FastAPI()
+    app.dependency_overrides[require_admin] = admin_user
+    adapter = mount(app, admin_user)
+    requests = []
+
+    def auth(request):
+        requests.append(request)
+        assert request.url.host == "abcdefghijklmnopqrst.supabase.co"
+        if request.method == "POST":
+            return httpx.Response(200, json={
+                "access_token": "PRUEBA-access", "refresh_token": "PRUEBA-refresh", "expires_in": 3600,
+            })
+        if request.url.path.endswith("/user"):
+            return httpx.Response(200, json={"email": ADMIN, "id": "PRUEBA-subject"})
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(adapter, "auth_client_factory", lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(auth), trust_env=False,
+    ))
+    payload = {
+        "project_url": URL, "auth_mode": mode, "tables": TABLES,
+        "anon_key": "sb_publishable_PRUEBA_local", "service_role_key": TEST_KEY,
+    }
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.put("/api/supabase/configuration", json=payload)
+        assert response.status_code == 200, response.text
+        assert response.json()["public_base_url_source"] == "environment"
+        if mode == "rls_personal":
+            await adapter.login(ADMIN, "PRUEBA-password")
+        generation = adapter._configuration_generation
+        sessions = dict(adapter._sessions)
+        states = dict(adapter._session_states)
+        config, settings = adapter.config, adapter.settings
+        request_count = len(requests)
+        configure = Mock(wraps=adapter.configure)
+        monkeypatch.setattr(adapter, "configure", configure)
+        payload.pop("anon_key")
+        payload.pop("service_role_key")
+        public = "https://employee.example.invalid"
+        for update, expected in [
+            ({"public_base_url": public.upper() + "/"}, public),
+            ({}, public), ({"public_base_url": None}, public),
+            ({"public_base_url": "   "}, None),
+        ]:
+            previous_public = adapter.public_base_url
+            response = await client.put("/api/supabase/configuration", json={**payload, **update})
+            assert response.status_code == 200, response.text
+            metadata = response.json()
+            assert metadata["access_changed"] is False
+            assert metadata["changed"] is (previous_public != expected)
+            assert metadata["public_base_url"] == expected
+            assert metadata["effective_public_base_url"] == (expected or "https://env.example.invalid")
+            assert metadata["public_base_url_source"] == ("configuration" if expected else "environment")
+            assert adapter._configuration_generation == generation
+            assert adapter._sessions == sessions and adapter._session_states == states
+            assert adapter.config is config and adapter.settings is settings
+            if mode == "rls_personal":
+                adapter._check_write_context(ADMIN, WriteContext(ADMIN, "PRUEBA-subject", URL, generation))
+        configure.assert_not_called()
+        assert len(requests) == request_count
+
+        invalid = await client.put("/api/supabase/configuration", json={**payload, "public_base_url": "https://secret@bad.invalid"})
+        assert invalid.status_code == 503
+        assert invalid.json()["detail"]["code"] == "supabase_public_base_url_invalid"
+        assert "secret" not in invalid.text
+        assert adapter.public_base_url is None
+        async with app_session() as session:
+            encrypted_before = (await session.get(AppSetting, "sgmcp_adapter_connection")).value
+
+        with monkeypatch.context() as patch:
+            patch.setattr(AsyncSession, "commit", AsyncMock(side_effect=RuntimeError("PRUEBA-storage")))
+            failed = await client.put("/api/supabase/configuration", json={
+                **payload, "read_limit": 19, "public_base_url": public,
+            })
+        assert failed.status_code == 503
+        assert failed.json()["detail"]["code"] == "supabase_configuration_storage_unavailable"
+        assert adapter.public_base_url is None
+        assert adapter.config is config and adapter.settings is settings
+        assert adapter._configuration_generation == generation
+        assert adapter._sessions == sessions and adapter._session_states == states
+        configure.assert_not_called()
+        async with app_session() as session:
+            assert (await session.get(AppSetting, "sgmcp_adapter_connection")).value == encrypted_before
+
+        status = await client.get("/api/supabase/session")
+        assert status.status_code == 200
+        assert not {"public_base_url", "effective_public_base_url", "public_base_url_source"} & status.json().keys()
+        changed = await client.put("/api/supabase/configuration", json={**payload, "read_limit": 18})
+        assert changed.status_code == 200, changed.text
+        assert changed.json()["access_changed"] is True
+        assert adapter._configuration_generation == generation + 1
+        assert adapter._sessions == {} and adapter._session_states == {}
+        configure.assert_called_once()
+
+    # Un blob anterior al campo sigue siendo legible y usa solo el fallback valido.
+    async with app_write() as session:
+        row = await session.get(AppSetting, "sgmcp_adapter_connection")
+        legacy = encryption.decrypt_blob(row.value)
+        legacy.pop("public_base_url")
+        row.value = encryption.encrypt_blob(legacy)
+        await session.commit()
+    restarted_app = FastAPI()
+    restarted_app.dependency_overrides[require_admin] = admin_user
+    restarted = mount(restarted_app, admin_user)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=restarted_app), base_url="http://test") as client:
+        loaded = await client.get("/api/supabase/configuration")
+        assert loaded.status_code == 200
+        assert loaded.json()["public_base_url"] is None
+        assert loaded.json()["effective_public_base_url"] == "https://env.example.invalid"
+        assert restarted.settings == settings
+        monkeypatch.setenv("APP_PUBLIC_BASE_URL", "http://bad.invalid")
+        loaded = await client.get("/api/supabase/configuration")
+        assert loaded.json()["effective_public_base_url"] is None
+        assert loaded.json()["public_base_url_source"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_admin", [True, False])
+async def test_public_configuration_requires_real_admin_dependency(monkeypatch, is_admin):
+    from app.auth import require_project_access
+    from app import users_directory
+
+    async def user():
+        return SimpleNamespace(email=ADMIN)
+
+    monkeypatch.setattr(users_directory, "is_admin", AsyncMock(return_value=is_admin))
+    app = FastAPI()
+    app.dependency_overrides[require_project_access] = user
+    adapter = mount(app, user)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/supabase/configuration")
+        assert response.status_code == (200 if is_admin else 403)
+        if is_admin:
+            assert response.json()["public_base_url"] is None
+        else:
+            response = await client.put("/api/supabase/configuration", json={
+                "project_url": URL, "auth_mode": "service_role", "tables": TABLES,
+                "service_role_key": TEST_KEY, "public_base_url": "https://admin.example.invalid",
+            })
+            assert response.status_code == 403
+            assert adapter._settings is None and adapter.public_base_url is None
+            async with app_session() as session:
+                assert await session.get(AppSetting, "sgmcp_adapter_connection") is None

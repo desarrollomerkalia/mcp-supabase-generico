@@ -12,10 +12,17 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from .core import Adapter, AdapterError
+from .public_url import public_url_metadata
 
 
 class LoginInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    password: SecretStr = Field(min_length=1, max_length=4096)
+
+
+class ChannelSessionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str = Field(min_length=1, max_length=8192)
     password: SecretStr = Field(min_length=1, max_length=4096)
 
 
@@ -32,6 +39,7 @@ class ConfigurationInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     project_url: str = Field(min_length=1, max_length=2048)
+    public_base_url: Optional[str] = Field(default=None, max_length=2048)
     auth_mode: str = Field(pattern="^(rls_personal|service_role)$")
     anon_key: Optional[SecretStr] = Field(default=None, min_length=1, max_length=8192)
     service_role_key: Optional[SecretStr] = Field(default=None, min_length=1, max_length=8192)
@@ -113,6 +121,7 @@ def connection_router(
             "configured": adapter._settings is not None,
             "configuration_code": None if adapter._settings is not None else (error.code if error else None),
             **configuration_metadata(),
+            **public_url_metadata(adapter.public_base_url),
             "tables": adapter.config.to_dict()["tables"],
             "denied": sorted(adapter.config.denied),
             "read_limit": adapter.config.read_limit,
@@ -125,8 +134,8 @@ def connection_router(
             raise HTTPException(403, {"code": "wai_permission_denied", "message": "Solo un administrador de este empleado puede configurar esta conexion."})
         if configuration_loader:
             await configuration_loader()
-        changed = await configuration_saver(body, user.email)
-        return {"configured": True, "changed": changed, **configuration_metadata()}
+        changes = await configuration_saver(body, user.email)
+        return {"configured": True, **changes, **configuration_metadata(), **public_url_metadata(adapter.public_base_url)}
 
     @router.post("/session")
     async def login(body: LoginInput, user=Depends(connected_user)):
@@ -139,5 +148,42 @@ def connection_router(
         if adapter.config.auth_mode != "rls_personal":
             return {"connected": True}
         return await adapter.disconnect(user.email)
+
+    @router.post("/channel-session")
+    async def channel_session(body: ChannelSessionInput, user=Depends(connected_user)):
+        """Consumes a verification link's token: logs in exactly like
+        /session (never trusts the token for identity, only Supabase's own
+        password check does that), and only on success links the channel
+        identity encoded in the token to this now-authenticated email. A
+        bad/expired token never blocks the login itself - only the binding."""
+        from .channel_binding import set_binding, verify_token
+
+        if adapter.config.auth_mode != "rls_personal":
+            raise HTTPException(409, {"code": "supabase_auth_mode_mismatch", "message": "Este empleado usa modo service_role; no requiere vinculo de canal."})
+        result = await adapter.login(user.email, body.password.get_secret_value())
+        decoded = verify_token(body.token)
+        if decoded is None:
+            return {**result, "channel_bound": False, "channel_bind_error": "supabase_channel_token_invalid"}
+        channel_id, external_identity = decoded
+        await set_binding(channel_id, external_identity, result["email"], actor_email=user.email)
+        return {**result, "channel_bound": True, "channel_bind_error": None}
+
+    @router.get("/channel-bindings")
+    async def list_channel_bindings(user=Depends(admin_dependency or authenticated_user_dependency)):
+        from .channel_binding import get_bindings
+
+        if admin_dependency is None:
+            raise HTTPException(403, {"code": "wai_permission_denied", "message": "Solo un administrador de este empleado puede consultar los vinculos de canal."})
+        bindings = await get_bindings()
+        return {"bindings": list(bindings.values())}
+
+    @router.delete("/channel-bindings/{channel_id}/{external_identity}")
+    async def delete_channel_binding(channel_id: int, external_identity: str, user=Depends(admin_dependency or authenticated_user_dependency)):
+        from .channel_binding import revoke_binding
+
+        if admin_dependency is None:
+            raise HTTPException(403, {"code": "wai_permission_denied", "message": "Solo un administrador de este empleado puede revocar vinculos de canal."})
+        revoked = await revoke_binding(channel_id, external_identity, actor_email=user.email)
+        return {"revoked": revoked}
 
     return router

@@ -22,6 +22,8 @@ export const SUPABASE_ERROR_CODES = [
   'sgmcp_read_rejected',
   'sgmcp_read_response_invalid',
   'sgmcp_read_unavailable',
+  'supabase_channel_not_verified',
+  'supabase_channel_token_invalid',
   'supabase_access_token_invalid',
   'supabase_anon_key_missing',
   'supabase_api_key_rejected',
@@ -38,6 +40,8 @@ export const SUPABASE_ERROR_CODES = [
   'supabase_invalid_credentials',
   'supabase_invalid_response',
   'supabase_not_configured',
+  'supabase_public_base_url_invalid',
+  'supabase_public_base_url_required',
   'supabase_operation_failed',
   'supabase_rate_limited',
   'supabase_request_invalid',
@@ -101,6 +105,9 @@ export type SupabaseTableAllowlist = {
 export type SupabaseConfiguration = Pick<
   SupabaseSession, 'configured' | 'configuration_code' | 'project_url' | 'auth_mode' | 'can_configure'
 > & {
+  public_base_url: string | null
+  effective_public_base_url: string | null
+  public_base_url_source: 'configuration' | 'environment' | null
   has_anon_key: boolean
   has_service_role_key: boolean
   tables: Record<string, SupabaseTableAllowlist>
@@ -109,6 +116,7 @@ export type SupabaseConfiguration = Pick<
 }
 
 export type SupabaseConfigurationInput = {
+  public_base_url?: string | null
   project_url: string
   auth_mode: SupabaseAuthMode
   anon_key?: string
@@ -118,13 +126,22 @@ export type SupabaseConfigurationInput = {
   read_limit: number
 }
 
-export type SupabaseConfigurationResult = {
+export type SupabaseConfigurationResult = Pick<SupabaseConfiguration,
+  'public_base_url' | 'effective_public_base_url' | 'public_base_url_source'> & {
   configured: true
   changed: boolean
+  access_changed: boolean
   project_url: string
   auth_mode: SupabaseAuthMode
   has_anon_key: boolean
   has_service_role_key: boolean
+}
+
+export type SupabaseChannelSessionResult = {
+  connected: true
+  email: string
+  channel_bound: boolean
+  channel_bind_error: SupabaseErrorCode | null
 }
 
 export function knownSupabaseCode(value: unknown): SupabaseErrorCode {
@@ -149,7 +166,7 @@ export function supabaseErrorCode(error: unknown): SupabaseErrorCode {
 }
 
 export async function supabaseRequest<T>(
-  path: '/session' | '/configuration',
+  path: '/session' | '/configuration' | '/channel-session',
   init: RequestInit = {},
 ): Promise<T> {
   let response: Response
@@ -210,6 +227,25 @@ export async function supabaseRequest<T>(
   const isValidAuthMode = (value: unknown): value is SupabaseAuthMode =>
     typeof value === 'string' && SUPABASE_AUTH_MODES.some((mode) => mode === value)
 
+  let publicUrlMetadata: Pick<SupabaseConfiguration,
+    'public_base_url' | 'effective_public_base_url' | 'public_base_url_source'> | undefined
+  if (path === '/configuration') {
+    if (!('public_base_url' in payload)
+      || (payload.public_base_url !== null && typeof payload.public_base_url !== 'string')
+      || !('effective_public_base_url' in payload)
+      || (payload.effective_public_base_url !== null && typeof payload.effective_public_base_url !== 'string')
+      || !('public_base_url_source' in payload)
+      || (payload.public_base_url_source !== null && payload.public_base_url_source !== 'configuration'
+        && payload.public_base_url_source !== 'environment')) {
+      throw new SupabaseError('supabase_invalid_response')
+    }
+    publicUrlMetadata = {
+      public_base_url: payload.public_base_url,
+      effective_public_base_url: payload.effective_public_base_url,
+      public_base_url_source: payload.public_base_url_source,
+    }
+  }
+
   if ((path === '/session' || path === '/configuration') && (init.method ?? 'GET').toUpperCase() === 'GET') {
     if (!('configured' in payload) || typeof payload.configured !== 'boolean'
       || !('configuration_code' in payload)
@@ -237,6 +273,7 @@ export async function supabaseRequest<T>(
       }
       return {
         ...configuration,
+        ...publicUrlMetadata,
         has_anon_key: payload.has_anon_key,
         has_service_role_key: payload.has_service_role_key,
         tables: payload.tables as Record<string, SupabaseTableAllowlist>,
@@ -268,6 +305,7 @@ export async function supabaseRequest<T>(
   if (path === '/configuration' && (init.method ?? 'GET').toUpperCase() === 'PUT') {
     if (!('configured' in payload) || payload.configured !== true
       || !('changed' in payload) || typeof payload.changed !== 'boolean'
+      || ('access_changed' in payload && typeof payload.access_changed !== 'boolean')
       || !('project_url' in payload) || typeof payload.project_url !== 'string'
       || !('auth_mode' in payload) || !isValidAuthMode(payload.auth_mode)
       || !('has_anon_key' in payload) || typeof payload.has_anon_key !== 'boolean'
@@ -276,8 +314,23 @@ export async function supabaseRequest<T>(
     }
     return {
       configured: true, changed: payload.changed,
+      access_changed: 'access_changed' in payload ? payload.access_changed : payload.changed,
+      ...publicUrlMetadata,
       project_url: payload.project_url, auth_mode: payload.auth_mode,
       has_anon_key: payload.has_anon_key, has_service_role_key: payload.has_service_role_key,
+    } as T
+  }
+  if (path === '/channel-session' && (init.method ?? 'GET').toUpperCase() === 'POST') {
+    if (!('connected' in payload) || payload.connected !== true
+      || !('email' in payload) || typeof payload.email !== 'string'
+      || !('channel_bound' in payload) || typeof payload.channel_bound !== 'boolean'
+      || !('channel_bind_error' in payload) || (payload.channel_bind_error !== null
+        && !SUPABASE_ERROR_CODES.some((code) => code === payload.channel_bind_error))) {
+      throw new SupabaseError('supabase_invalid_response')
+    }
+    return {
+      connected: true, email: payload.email,
+      channel_bound: payload.channel_bound, channel_bind_error: payload.channel_bind_error,
     } as T
   }
   return payload as T

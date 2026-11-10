@@ -156,6 +156,7 @@ function ConfigurationForm({ email }: { email: string }) {
   const queryClient = useQueryClient()
   const pendingConfiguration = useRef<SupabaseConfigurationInput | null>(null)
   const [projectUrlDraft, setProjectUrlDraft] = useState<string | null>(null)
+  const [publicBaseUrlDraft, setPublicBaseUrlDraft] = useState<string | null>(null)
   const [authModeDraft, setAuthModeDraft] = useState<SupabaseAuthMode | null>(null)
   const [keyDraft, setKeyDraft] = useState('')
   const [tablesDraft, setTablesDraft] = useState<TableDraft[] | null>(null)
@@ -195,7 +196,7 @@ function ConfigurationForm({ email }: { email: string }) {
     gcTime: 0,
     onMutate: () => { setError(null); setSaved(null) },
     onSuccess: async (result) => {
-      if (result.changed) {
+      if (result.access_changed) {
         const dataQueries = {
           predicate: (query: { queryKey: readonly unknown[] }) =>
             typeof query.queryKey[0] === 'string' && query.queryKey[0].startsWith('supabase-')
@@ -209,6 +210,7 @@ function ConfigurationForm({ email }: { email: string }) {
       }
       await queryClient.invalidateQueries({ queryKey: ['supabase-configuration'] })
       setProjectUrlDraft(null)
+      setPublicBaseUrlDraft(null)
       setAuthModeDraft(null)
       setTablesDraft(null)
       setDenyInsertDraft(null)
@@ -227,6 +229,16 @@ function ConfigurationForm({ email }: { email: string }) {
 
   const data = configuration.data
   const projectUrl = projectUrlDraft ?? data?.project_url ?? ''
+  const publicBaseUrl = publicBaseUrlDraft ?? data?.public_base_url ?? ''
+  const publicBaseUrlValid = (() => {
+    if (!publicBaseUrl.trim()) return true
+    try {
+      const url = new URL(publicBaseUrl.trim())
+      return /^https:\/\/[^/?#\\\s]+\/?$/i.test(publicBaseUrl.trim())
+        && url.protocol === 'https:' && !url.username && !url.password
+        && url.pathname === '/' && !url.search && !url.hash
+    } catch { return false }
+  })()
   const authMode = authModeDraft ?? data?.auth_mode ?? 'rls_personal'
   const tables = tablesDraft ?? (data ? tablesFromConfig(data.tables) : [])
   const denyInsert = denyInsertDraft ?? (data?.denied.includes('insertar_registros') ?? false)
@@ -274,6 +286,12 @@ function ConfigurationForm({ email }: { email: string }) {
               <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
                 {t('supabaseConfiguration.projectUrl', { url: data.project_url ?? t('supabaseConfiguration.projectUrlMissing') })}
               </Typography>
+              <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
+                {t('supabaseConfiguration.effectivePublicBaseUrl', {
+                  url: data.effective_public_base_url ?? t('supabaseConfiguration.publicBaseUrlSource.unconfigured'),
+                  source: t(`supabaseConfiguration.publicBaseUrlSource.${data.public_base_url_source ?? 'unconfigured'}`),
+                })}
+              </Typography>
               <Alert severity={hasKeyForMode ? 'info' : 'warning'}>
                 {t(hasKeyForMode ? 'supabaseConfiguration.keySaved' : 'supabaseConfiguration.notConfigured', { mode: t(`supabaseConfiguration.authMode.${authMode}`) })}
               </Alert>
@@ -282,20 +300,24 @@ function ConfigurationForm({ email }: { email: string }) {
                 <Alert severity="warning">{t(`supabaseConfiguration.errors.${knownSupabaseCode(data.configuration_code)}`)}</Alert>
               )}
               {error && <Alert severity="error">{t(`supabaseConfiguration.errors.${error}`)}</Alert>}
-              {saved && <Alert severity="success">{t(saved === 'changed' ? 'supabaseConfiguration.saved' : 'supabaseConfiguration.unchanged')}</Alert>}
+              {saved && <Alert severity="success">{t('supabaseConfiguration.savedConfiguration')}</Alert>}
               {data.can_configure === true ? (
                 <Stack spacing={2} component="form" autoComplete="off" onInvalid={() => setKeyDraft('')} onSubmit={(event) => {
                   event.preventDefault()
                   const key = keyDraft.trim()
                   setKeyDraft('')
-                  if (!verified || data.can_configure !== true || !projectUrl.trim() || !tablesPayload || !readLimitValid
+                  if (!verified || data.can_configure !== true || !projectUrl.trim() || !publicBaseUrlValid || !tablesPayload || !readLimitValid
                     || (!hasKeyForMode && !key) || save.isPending || pendingConfiguration.current) return
                   pendingConfiguration.current = {
                     project_url: projectUrl.trim(),
+                    ...(publicBaseUrlDraft !== null ? { public_base_url: publicBaseUrl.trim() } : {}),
                     auth_mode: authMode,
                     ...(key ? (authMode === 'rls_personal' ? { anon_key: key } : { service_role_key: key }) : {}),
                     tables: tablesPayload,
                     denied: [
+                      ...data.denied.filter((operation) => ![
+                        'insertar_registros', 'actualizar_registros', 'eliminar_registros',
+                      ].includes(operation)),
                       ...(denyInsert ? ['insertar_registros'] : []),
                       ...(denyUpdate ? ['actualizar_registros'] : []),
                       ...(denyDelete ? ['eliminar_registros'] : []),
@@ -304,7 +326,17 @@ function ConfigurationForm({ email }: { email: string }) {
                   }
                   save.mutate()
                 }}>
-                  <Alert severity="warning">{t('supabaseConfiguration.sessionWarning')}</Alert>
+                  <Alert severity="warning">{t('supabaseConfiguration.sessionWarningWithPublicUrl')}</Alert>
+                  <TextField
+                    fullWidth type="text" autoComplete="off"
+                    label={t('supabaseConfiguration.publicBaseUrlLabel')}
+                    placeholder={t('supabaseConfiguration.publicBaseUrlPlaceholder')}
+                    helperText={t(publicBaseUrlValid ? 'supabaseConfiguration.publicBaseUrlHelp' : 'supabaseConfiguration.publicBaseUrlInvalid')}
+                    value={publicBaseUrl}
+                    error={!publicBaseUrlValid}
+                    onChange={(event) => { setPublicBaseUrlDraft(event.target.value); setSaved(null) }}
+                    disabled={save.isPending}
+                  />
                   <TextField
                     fullWidth required type="url" autoComplete="off"
                     label={t('supabaseConfiguration.projectUrlLabel')}
@@ -507,7 +539,7 @@ function ConfigurationForm({ email }: { email: string }) {
                   </Button>
 
                   <Button type="submit" variant="contained"
-                    disabled={!projectUrl.trim() || !allowlistValid || (!hasKeyForMode && !keyDraft.trim()) || save.isPending}>
+                    disabled={!projectUrl.trim() || !publicBaseUrlValid || !allowlistValid || (!hasKeyForMode && !keyDraft.trim()) || save.isPending}>
                     {t(save.isPending ? 'supabaseConfiguration.saving' : 'supabaseConfiguration.save')}
                   </Button>
                 </Stack>
